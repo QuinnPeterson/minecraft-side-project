@@ -1,0 +1,11 @@
+# Build output
+bin/
+obj/
+
+# MonoGame content build output
+Content/bin/
+Content/obj/
+
+# IDE files
+.vs/
+*.user

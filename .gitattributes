@@ -1,0 +1,2 @@
+# Keep shell scripts LF-only so the shebang works in Git Bash after checkout.
+*.sh text eol=lf

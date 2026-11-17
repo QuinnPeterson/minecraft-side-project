@@ -1,0 +1,34 @@
+{
+  // C# debugging for all three projects. Shared library code is compiled into
+  // both executables, so breakpoints in src/Minecraft.Shared are hit from
+  // either the client or the server session.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Client (Debug)",
+      "type": "dotnet",
+      "request": "launch",
+      "projectPath": "${workspaceFolder}/src/Minecraft.Client/Minecraft.Client.csproj",
+      "console": "internalConsole"
+    },
+    {
+      "name": "Server (Debug)",
+      "type": "dotnet",
+      "request": "launch",
+      "projectPath": "${workspaceFolder}/src/Minecraft.Server/Minecraft.Server.csproj",
+      // The server reads commands with Console.ReadLine(), so give it a
+      // terminal you can actually type into.
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Client + Server (Debug)",
+      "configurations": [
+        "Server (Debug)",
+        "Client (Debug)"
+      ],
+      "stopAll": true
+    }
+  ]
+}
