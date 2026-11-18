@@ -48,6 +48,39 @@ public static class FlatWorldGenerator
         PlantTree(world, sizeX * 3 / 8, sizeZ / 4, ground);
         PlantTree(world, sizeX / 2, sizeZ - 6, ground);
 
+        // A small pond. The single source spreads into the surrounding air,
+        // exercising the server's water simulation.
+        for (var dx = -2; dx <= 2; dx++)
+        {
+            for (var dz = -2; dz <= 2; dz++)
+            {
+                var px = sizeX / 2 + dx;
+                var pz = sizeZ / 2 + dz;
+
+                if (world.InBounds(px, ground, pz))
+                {
+                    world.SetBlock(px, ground, pz, BlockId.Water);
+                }
+            }
+        }
+
+        // A few crops near the middle of the world.
+        for (var dx = -3; dx <= 3; dx += 2)
+        {
+            for (var dz = -3; dz <= 3; dz += 2)
+            {
+                var px = sizeX / 2 + dx;
+                var pz = sizeZ / 2 + dz + 6;
+                var py = ground + 1;
+
+                if (world.InBounds(px, py, pz) &&
+                    world.GetBlock(px, py, pz) == BlockId.Air)
+                {
+                    world.SetBlock(px, py, pz, BlockId.Wheat3);
+                }
+            }
+        }
+
         return world;
     }
 

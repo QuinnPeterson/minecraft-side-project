@@ -4,33 +4,22 @@ using Minecraft.Shared.Worlds;
 
 namespace Minecraft.Shared.Net;
 
-/// <summary>A single block edit sent from the server to its clients.</summary>
+/// <summary>A single block edit sent over the Lidgren packet stream.</summary>
 public readonly record struct BlockChange(int X, int Y, int Z, BlockId Block);
 
 /// <summary>
-/// Wire protocol shared by the server and the client.
-/// Every message starts with a type byte, followed by its payload.
+/// World packets carried by the upstream-style Lidgren transport. Every packet
+/// starts with a <see cref="PacketType"/> byte followed by its payload.
 /// </summary>
 public static class WorldProtocol
 {
-    /// <summary>Lidgren refuses connections between peers with different identifiers.</summary>
-    public const string AppIdentifier = "MinecraftSideProject";
-
-    public const int DefaultPort = 25565;
-
-    public const byte WorldSnapshot = 1;
-    public const byte BlockUpdate = 2;
-
-    /// <summary>
-    /// Builds a full copy of the world. Lidgren fragments and reassembles
-    /// messages larger than the MTU automatically, so no manual chunking is needed.
-    /// </summary>
-    public static NetOutgoingMessage CreateWorldSnapshot(NetPeer peer, World world)
+    public static NetOutgoingMessage CreateWorldSnapshot(NetPeer peer, string groupId, World world)
     {
         var blockCount = world.SizeX * world.SizeY * world.SizeZ;
-        var message = peer.CreateMessage(13 + blockCount * sizeof(ushort));
+        var message = peer.CreateMessage(13 + groupId.Length + blockCount * sizeof(ushort));
 
-        message.Write(WorldSnapshot);
+        message.Write((byte)PacketType.WorldSnapshot);
+        message.Write(groupId);
         message.Write(world.SizeX);
         message.Write(world.SizeY);
         message.Write(world.SizeZ);
@@ -49,7 +38,8 @@ public static class WorldProtocol
         return message;
     }
 
-    public static World ReadWorldSnapshot(NetIncomingMessage message)
+    /// <summary>The packet type and group id are read by the caller.</summary>
+    public static World ReadWorldSnapshot(NetBuffer message)
     {
         var sizeX = message.ReadInt32();
         var sizeY = message.ReadInt32();
@@ -72,13 +62,16 @@ public static class WorldProtocol
 
     public static NetOutgoingMessage CreateBlockUpdate(
         NetPeer peer,
+        string groupId,
         int x,
         int y,
         int z,
         BlockId block)
     {
-        var message = peer.CreateMessage(15);
-        message.Write(BlockUpdate);
+        var message = peer.CreateMessage(17 + groupId.Length);
+
+        message.Write((byte)PacketType.BlockUpdate);
+        message.Write(groupId);
         message.Write(x);
         message.Write(y);
         message.Write(z);
@@ -86,6 +79,13 @@ public static class WorldProtocol
         return message;
     }
 
-    public static BlockChange ReadBlockUpdate(NetIncomingMessage message) =>
-        new(message.ReadInt32(), message.ReadInt32(), message.ReadInt32(), (BlockId)message.ReadUInt16());
+    /// <summary>The packet type and group id are read by the caller.</summary>
+    public static BlockChange ReadBlockUpdate(NetBuffer message)
+    {
+        return new BlockChange(
+            message.ReadInt32(),
+            message.ReadInt32(),
+            message.ReadInt32(),
+            (BlockId)message.ReadUInt16());
+    }
 }

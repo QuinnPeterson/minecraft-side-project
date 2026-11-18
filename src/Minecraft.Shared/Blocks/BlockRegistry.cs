@@ -18,7 +18,22 @@ public static class BlockRegistry
         new(BlockId.Sand, "Sand", 0xD9C48A, IsSolid: true, IsTransparent: false),
         new(BlockId.Wood, "Wood", 0x6B4A2B, IsSolid: true, IsTransparent: false),
         new(BlockId.Leaves, "Leaves", 0x2E6B1F, IsSolid: true, IsTransparent: true),
-        new(BlockId.Water, "Water", 0x2A6FDB, IsSolid: false, IsTransparent: true),
+        new(BlockId.Water, "Water", 0x2A6FDB, IsSolid: false, IsTransparent: true, Alpha: 0.72f, Shape: BlockShape.Water),
+        new(BlockId.WaterFlow1, "WaterFlow1", 0x2F78DE, IsSolid: false, IsTransparent: true, Alpha: 0.68f, Shape: BlockShape.Water),
+        new(BlockId.WaterFlow2, "WaterFlow2", 0x3481E1, IsSolid: false, IsTransparent: true, Alpha: 0.64f, Shape: BlockShape.Water),
+        new(BlockId.WaterFlow3, "WaterFlow3", 0x398AE4, IsSolid: false, IsTransparent: true, Alpha: 0.60f, Shape: BlockShape.Water),
+        new(BlockId.WaterFlow4, "WaterFlow4", 0x3E93E7, IsSolid: false, IsTransparent: true, Alpha: 0.56f, Shape: BlockShape.Water),
+        new(BlockId.WaterFlow5, "WaterFlow5", 0x439CEA, IsSolid: false, IsTransparent: true, Alpha: 0.52f, Shape: BlockShape.Water),
+        new(BlockId.WaterFlow6, "WaterFlow6", 0x48A5ED, IsSolid: false, IsTransparent: true, Alpha: 0.48f, Shape: BlockShape.Water),
+        new(BlockId.WaterFlow7, "WaterFlow7", 0x4DAEF0, IsSolid: false, IsTransparent: true, Alpha: 0.44f, Shape: BlockShape.Water),
+        new(BlockId.WaterFalling, "WaterFalling", 0x2A6FDB, IsSolid: false, IsTransparent: true, Alpha: 0.72f, Shape: BlockShape.Water),
+        new(BlockId.Wheat1, "Wheat1", 0x4E8F2A, IsSolid: false, IsTransparent: true, Shape: BlockShape.Cross),
+        new(BlockId.Wheat2, "Wheat2", 0x599C30, IsSolid: false, IsTransparent: true, Shape: BlockShape.Cross),
+        new(BlockId.Wheat3, "Wheat3", 0x64A936, IsSolid: false, IsTransparent: true, Shape: BlockShape.Cross),
+        new(BlockId.Wheat4, "Wheat4", 0x6FB63C, IsSolid: false, IsTransparent: true, Shape: BlockShape.Cross),
+        new(BlockId.Wheat5, "Wheat5", 0x7AC342, IsSolid: false, IsTransparent: true, Shape: BlockShape.Cross),
+        new(BlockId.Wheat6, "Wheat6", 0x85D048, IsSolid: false, IsTransparent: true, Shape: BlockShape.Cross),
+        new(BlockId.Wheat7, "Wheat7", 0x90DD4E, IsSolid: false, IsTransparent: true, Shape: BlockShape.Cross),
     }.AsReadOnly();
 
     private static readonly IReadOnlyDictionary<BlockId, BlockDefinition> BlocksById =
@@ -44,4 +59,48 @@ public static class BlockRegistry
 
     public static bool TryGetByName(string name, out BlockDefinition block) =>
         BlocksByName.TryGetValue(name, out block!);
+
+    public static bool IsWater(BlockId id) =>
+        id == BlockId.Water ||
+        id == BlockId.WaterFalling ||
+        IsWaterFlow(id);
+
+    public static bool IsWaterFlow(BlockId id) =>
+        id >= BlockId.WaterFlow1 && id <= BlockId.WaterFlow7;
+
+    public static bool IsPlant(BlockId id) =>
+        id >= BlockId.Wheat1 && id <= BlockId.Wheat7;
+
+    /// <summary>Returns 0 for a source, 1-7 for flow, or -1 for other blocks.</summary>
+    public static int WaterLevel(BlockId id)
+    {
+        if (id == BlockId.Water || id == BlockId.WaterFalling)
+        {
+            return 0;
+        }
+
+        return IsWaterFlow(id) ? (int)id - (int)BlockId.WaterFlow1 + 1 : -1;
+    }
+
+    public static BlockId WaterBlockForLevel(int level)
+    {
+        if (level <= 0)
+        {
+            return BlockId.Water;
+        }
+
+        var clamped = Math.Min(level, 7);
+        return (BlockId)((int)BlockId.WaterFlow1 + clamped - 1);
+    }
+
+    /// <summary>Advances a crop one stage; mature crops stay put.</summary>
+    public static BlockId NextPlantStage(BlockId id)
+    {
+        if (id >= BlockId.Wheat7)
+        {
+            return id;
+        }
+
+        return IsPlant(id) ? (BlockId)((int)id + 1) : id;
+    }
 }
