@@ -168,6 +168,10 @@ public class Game1 : Game
 
     private double _networkTime;
 
+    private int _fps;
+    private int _frameCount;
+    private double _fpsTimer;
+
 
 
     private BasicEffect _effect = null!;
@@ -269,8 +273,11 @@ public class Game1 : Game
 
 
     protected override void Initialize()
-
+    
     {
+        _graphics.SynchronizeWithVerticalRetrace = false;
+        IsFixedTimeStep = true;
+        TargetElapsedTime = TimeSpan.FromTicks(TimeSpan.TicksPerSecond / 200);
 
         _graphics.PreferredBackBufferWidth = 1280;
 
@@ -487,8 +494,17 @@ public class Game1 : Game
 
 
     protected override void Draw(GameTime gameTime)
-
+    
     {
+        _frameCount++;
+        _fpsTimer += gameTime.ElapsedGameTime.TotalSeconds;
+
+        if (_fpsTimer >= 1.0)
+        {
+            _fps = _frameCount;
+            _frameCount = 0;
+            _fpsTimer -= 1.0;
+        }
 
         GraphicsDevice.Clear(SkyColor);
 
@@ -2312,9 +2328,21 @@ public class Game1 : Game
 
 
 
-        if (!_world.InBounds(placeX, placeY, placeZ) ||
+        if (!_world.InBounds(placeX, placeY, placeZ))
 
-            _world.GetBlock(placeX, placeY, placeZ) != BlockId.Air)
+        {
+
+            return;
+
+        }
+
+        var existingBlock = _world.GetBlock(placeX, placeY, placeZ);
+
+        if (existingBlock != BlockId.Air &&
+
+            !BlockRegistry.IsWater(existingBlock) &&
+
+            !BlockRegistry.IsPlant(existingBlock))
 
         {
 
@@ -2589,6 +2617,8 @@ public class Game1 : Game
         DrawLabel($"Selected: {selected.Name}  (1-9 / mouse wheel)", new Vector2(12f, 12f));
 
         DrawLabel($"You: {_network.Username}", new Vector2(12f, 38f));
+
+        DrawLabel($"FPS: {_fps}", new Vector2(12f, 64f));
 
 
 

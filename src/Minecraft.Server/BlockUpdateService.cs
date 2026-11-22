@@ -7,14 +7,16 @@ using Minecraft.Shared.Worlds;
 namespace LetsCreateNetworkGame.Server;
 
 /// <summary>
-/// Runs block simulation on a dedicated thread: queued block edits, water flow,
-/// and plant growth. Applying edits through this service keeps the network loop
-/// and console commands from blocking on world mutation.
+/// Runs block simulation on a dedicated thread. Water uses a TrueCraft-style
+/// cellular automaton: each fluid block examines its neighbors and nearest
+/// drop-offs, then flows outward or settles.
 /// </summary>
 public sealed class BlockUpdateService : IDisposable
 {
     private const int TicksPerSecond = 10;
     private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1.0 / TicksPerSecond);
+    private const int MaximumFluidDepletion = 7;
+    private const int DropCheckDistance = 2;
     private const int PlantGrowthIntervalTicks = 20;
 
     private readonly World _world;
@@ -101,7 +103,28 @@ public sealed class BlockUpdateService : IDisposable
         var changes = new List<BlockChange>();
 
         DrainEdits(changes);
-        UpdateWater(changes);
+
+        // Snapshot water cells so a block updated this tick is not processed
+        // again until the next tick.
+        var waterCells = new List<(int X, int Y, int Z)>();
+
+        lock (_worldSync)
+        {
+            for (var x = 0; x < _world.SizeX; x++)
+            for (var y = 0; y < _world.SizeY; y++)
+            for (var z = 0; z < _world.SizeZ; z++)
+            {
+                if (BlockRegistry.IsWater(_world.GetBlock(x, y, z)))
+                {
+                    waterCells.Add((x, y, z));
+                }
+            }
+        }
+
+        foreach (var (x, y, z) in waterCells)
+        {
+            DoAutomata(changes, x, y, z);
+        }
 
         if (_tickCounter % PlantGrowthIntervalTicks == 0)
         {
@@ -138,240 +161,383 @@ public sealed class BlockUpdateService : IDisposable
         }
     }
 
-    private void UpdateWater(List<BlockChange> changes)
+    private void DoAutomata(List<BlockChange> changes, int x, int y, int z)
     {
         lock (_worldSync)
         {
-            var sizeX = _world.SizeX;
-            var sizeY = _world.SizeY;
-            var sizeZ = _world.SizeZ;
-
-            // Snapshot the water that exists right now. New water created this
-            // tick is not propagated until the next tick, which gives the flow
-            // its cellular-automaton, one-cell-per-tick character.
-            var sources = new List<(int X, int Y, int Z)>();
-            var flows = new List<(int X, int Y, int Z, int Level)>();
-
-            for (var x = 0; x < sizeX; x++)
-            for (var y = 0; y < sizeY; y++)
-            for (var z = 0; z < sizeZ; z++)
+            if (!_world.InBounds(x, y, z))
             {
-                var block = _world.GetBlock(x, y, z);
-
-                if (block == BlockId.Water)
-                {
-                    sources.Add((x, y, z));
-                }
-                else if (block == BlockId.WaterFalling)
-                {
-                    flows.Add((x, y, z, 0));
-                }
-                else if (BlockRegistry.IsWaterFlow(block))
-                {
-                    flows.Add((x, y, z, BlockRegistry.WaterLevel(block)));
-                }
+                return;
             }
 
-            // Collect candidate placements, keeping the strongest (lowest) level
-            // when several sources compete for the same cell.
-            var placementLevels = new Dictionary<(int X, int Y, int Z), (int Level, bool Falling)>();
+            var current = _world.GetBlock(x, y, z);
 
-            foreach (var (x, y, z) in sources)
+            if (!BlockRegistry.IsWater(current))
             {
-                TrySpreadWater(x, y, z, 0, sizeX, sizeY, sizeZ, placementLevels);
+                return;
             }
 
-            foreach (var (x, y, z, level) in flows)
+            var coords = new Coordinates3D(x, y, z);
+            var previousLevel = BlockRegistry.WaterLevel(current);
+            if (previousLevel < 0)
             {
-                TrySpreadWater(x, y, z, level, sizeX, sizeY, sizeZ, placementLevels);
+                previousLevel = 0;
             }
 
-            foreach (var (cell, info) in placementLevels)
-            {
-                var block = info.Falling
-                    ? BlockId.WaterFalling
-                    : BlockRegistry.WaterBlockForLevel(info.Level);
+            var inward = DetermineInwardFlow(coords);
+            var outward = DetermineOutwardFlow(coords, previousLevel);
 
-                if (_world.SetBlock(cell.X, cell.Y, cell.Z, block))
-                {
-                    changes.Add(new BlockChange(cell.X, cell.Y, cell.Z, block));
-                }
+            // Flowing down takes priority for non-source water.
+            if (outward.Length == 1 &&
+                outward[0].TargetBlock == coords + Coordinates3D.Down &&
+                previousLevel != 0)
+            {
+                FlowOutward(changes, outward[0]);
+                return;
             }
 
-            // Decay: a flow cell survives only while it has a valid inflow.
-            // Removing invalid cells cascades over subsequent ticks.
-            var removals = new List<(int X, int Y, int Z)>();
-
-            for (var x = 0; x < sizeX; x++)
-            for (var y = 0; y < sizeY; y++)
-            for (var z = 0; z < sizeZ; z++)
-            {
-                var block = _world.GetBlock(x, y, z);
-
-                if (!BlockRegistry.IsWaterFlow(block) && block != BlockId.WaterFalling)
-                {
-                    continue;
-                }
-
-                if (!HasWaterInflow(x, y, z, block, sizeX, sizeY, sizeZ))
-                {
-                    removals.Add((x, y, z));
-                }
-            }
-
-            foreach (var (x, y, z) in removals)
+            // Inward flow.
+            if (inward > MaximumFluidDepletion)
             {
                 if (_world.SetBlock(x, y, z, BlockId.Air))
                 {
                     changes.Add(new BlockChange(x, y, z, BlockId.Air));
                 }
+
+                return;
+            }
+
+            if (inward != previousLevel)
+            {
+                SetWaterLevel(coords, inward);
+
+                if (inward == 0 && previousLevel != 0)
+                {
+                    // Became a source block.
+                    return;
+                }
+            }
+
+            // Outward flow.
+            foreach (var flow in outward)
+            {
+                FlowOutward(changes, flow);
             }
         }
     }
 
-    private void TrySpreadWater(
-        int x,
-        int y,
-        int z,
-        int level,
-        int sizeX,
-        int sizeY,
-        int sizeZ,
-        Dictionary<(int X, int Y, int Z), (int Level, bool Falling)> placements)
+    private byte DetermineInwardFlow(Coordinates3D coords)
     {
-        // Water always tries to fall first. Falling water resets to level 0.
-        TryPlaceWater(x, y - 1, z, 0, true, sizeX, sizeY, sizeZ, placements);
-
-        // Horizontal spread only happens when the cell below is solid or water,
-        // so water never floats in mid air. Each step weakens the flow.
-        if (level < 7)
+        var currentLevel = BlockRegistry.WaterLevel(_world.GetBlock(coords.X, coords.Y, coords.Z));
+        if (currentLevel < 0)
         {
-            TryPlaceWater(x + 1, y, z, level + 1, false, sizeX, sizeY, sizeZ, placements);
-            TryPlaceWater(x - 1, y, z, level + 1, false, sizeX, sizeY, sizeZ, placements);
-            TryPlaceWater(x, y, z + 1, level + 1, false, sizeX, sizeY, sizeZ, placements);
-            TryPlaceWater(x, y, z - 1, level + 1, false, sizeX, sizeY, sizeZ, placements);
+            currentLevel = 0;
+        }
+
+        var upBlock = GetBlock(coords + Coordinates3D.Up);
+
+        if (BlockRegistry.IsWater(upBlock))
+        {
+            return (byte)currentLevel;
+        }
+
+        if (currentLevel == 0)
+        {
+            return 0;
+        }
+
+        byte highestNeighboringFluid = 15;
+        var neighboringSourceBlocks = 0;
+
+        foreach (var neighbor in Neighbors(coords))
+        {
+            var neighborBlock = GetBlock(neighbor);
+
+            if (!BlockRegistry.IsWater(neighborBlock))
+            {
+                continue;
+            }
+
+            var neighborLevel = BlockRegistry.WaterLevel(neighborBlock);
+            if (neighborLevel < 0)
+            {
+                neighborLevel = 0;
+            }
+
+            if (neighborLevel < highestNeighboringFluid)
+            {
+                highestNeighboringFluid = (byte)neighborLevel;
+            }
+
+            if (neighborLevel == 0)
+            {
+                neighboringSourceBlocks++;
+            }
+        }
+
+        if (neighboringSourceBlocks >= 2)
+        {
+            return 0;
+        }
+
+        if (highestNeighboringFluid > 0)
+        {
+            return (byte)(highestNeighboringFluid + 1);
+        }
+
+        return (byte)currentLevel;
+    }
+
+    private LiquidFlow[] DetermineOutwardFlow(Coordinates3D coords, int currentLevel)
+    {
+        var outwardFlow = new List<LiquidFlow>(5);
+
+        var below = coords + Coordinates3D.Down;
+
+        if (InBounds(below) && IsPassable(GetBlock(below)) && !BlockRegistry.IsWater(GetBlock(below)))
+        {
+            outwardFlow.Add(new LiquidFlow(below, 1));
+
+            if (currentLevel != 0)
+            {
+                return outwardFlow.ToArray();
+            }
+        }
+
+        if (currentLevel >= MaximumFluidDepletion)
+        {
+            return outwardFlow.ToArray();
+        }
+
+        // Find the nearest drop-off.
+        var candidateFlowPoints = new List<Coordinates3D>(4);
+        var furthest = new Coordinates3D(DropCheckDistance + 1, DropCheckDistance + 1, 0) + Coordinates3D.Down;
+        var nearestCandidate = furthest;
+
+        for (var dx = -DropCheckDistance; dx <= DropCheckDistance; dx++)
+        {
+            for (var dz = -DropCheckDistance; dz <= DropCheckDistance; dz++)
+            {
+                if (Math.Abs(dx) + Math.Abs(dz) > DropCheckDistance)
+                {
+                    continue;
+                }
+
+                var check = new Coordinates3D(dx, 0, dz) + Coordinates3D.Down;
+                var target = coords + check;
+
+                if (!InBounds(target))
+                {
+                    continue;
+                }
+
+                var provider = GetBlock(target);
+
+                if (!IsPassable(provider) || BlockRegistry.IsWater(provider))
+                {
+                    continue;
+                }
+
+                if (!LineOfSight(coords + Coordinates3D.Up, target))
+                {
+                    continue;
+                }
+
+                var distance = Math.Abs(dx) + Math.Abs(dz);
+
+                if (distance < Math.Abs(nearestCandidate.X) + Math.Abs(nearestCandidate.Z))
+                {
+                    candidateFlowPoints.Clear();
+                    nearestCandidate = check;
+                    candidateFlowPoints.Add(check);
+                }
+                else if (distance == Math.Abs(nearestCandidate.X) + Math.Abs(nearestCandidate.Z))
+                {
+                    candidateFlowPoints.Add(check);
+                }
+            }
+        }
+
+        if (nearestCandidate == furthest)
+        {
+            candidateFlowPoints.Add(new Coordinates3D(-DropCheckDistance - 1, 0, DropCheckDistance + 1) + Coordinates3D.Down);
+            candidateFlowPoints.Add(new Coordinates3D(DropCheckDistance + 1, 0, -DropCheckDistance - 1) + Coordinates3D.Down);
+            candidateFlowPoints.Add(new Coordinates3D(-DropCheckDistance - 1, 0, -DropCheckDistance - 1) + Coordinates3D.Down);
+        }
+
+        candidateFlowPoints.Add(nearestCandidate);
+
+        foreach (var location in candidateFlowPoints)
+        {
+            var clamped = new Coordinates3D(
+                Math.Clamp(location.X, -1, 1),
+                0,
+                Math.Clamp(location.Z, -1, 1));
+
+            var xCheck = coords + new Coordinates3D(clamped.X, 0, 0);
+            var zCheck = coords + new Coordinates3D(0, 0, clamped.Z);
+
+            var xBlock = GetBlock(xCheck);
+            var zBlock = GetBlock(zCheck);
+
+            if (IsPassable(xBlock) && !BlockRegistry.IsWater(xBlock))
+            {
+                if (!outwardFlow.Any(f => f.TargetBlock == xCheck))
+                {
+                    outwardFlow.Add(new LiquidFlow(xCheck, (byte)(currentLevel + 1)));
+                }
+            }
+
+            if (IsPassable(zBlock) && !BlockRegistry.IsWater(zBlock))
+            {
+                if (!outwardFlow.Any(f => f.TargetBlock == zCheck))
+                {
+                    outwardFlow.Add(new LiquidFlow(zCheck, (byte)(currentLevel + 1)));
+                }
+            }
+        }
+
+        // Occasionally there are scenarios where the nearest candidate hole is
+        // not acceptable, but there is space immediately next to the block.
+        if (outwardFlow.Count == 0 && !BlockRegistry.IsWater(GetBlock(below)))
+        {
+            foreach (var neighbor in Neighbors(coords))
+            {
+                var block = GetBlock(neighbor);
+
+                if (IsPassable(block) && !BlockRegistry.IsWater(block))
+                {
+                    outwardFlow.Add(new LiquidFlow(neighbor, (byte)(currentLevel + 1)));
+                }
+            }
+        }
+
+        return outwardFlow.ToArray();
+    }
+
+    private void FlowOutward(List<BlockChange> changes, LiquidFlow flow)
+    {
+        if (!_world.InBounds(flow.TargetBlock.X, flow.TargetBlock.Y, flow.TargetBlock.Z))
+        {
+            return;
+        }
+
+        var targetBlock = GetBlock(flow.TargetBlock);
+
+        if (BlockRegistry.IsWater(targetBlock))
+        {
+            return;
+        }
+
+        if (!IsPassable(targetBlock))
+        {
+            return;
+        }
+
+        var level = flow.Level;
+
+        if (level > MaximumFluidDepletion)
+        {
+            level = MaximumFluidDepletion;
+        }
+
+        SetWaterLevel(flow.TargetBlock, level);
+
+        changes.Add(new BlockChange(
+            flow.TargetBlock.X,
+            flow.TargetBlock.Y,
+            flow.TargetBlock.Z,
+            LevelToBlock(level)));
+    }
+
+    private void SetWaterLevel(Coordinates3D coords, int level)
+    {
+        if (level <= 0)
+        {
+            _world.SetBlock(coords.X, coords.Y, coords.Z, BlockId.Water);
+        }
+        else if (level <= MaximumFluidDepletion)
+        {
+            _world.SetBlock(coords.X, coords.Y, coords.Z, (BlockId)((int)BlockId.WaterFlow1 + level - 1));
+        }
+        else
+        {
+            _world.SetBlock(coords.X, coords.Y, coords.Z, BlockId.Air);
         }
     }
 
-    private void TryPlaceWater(
-        int x,
-        int y,
-        int z,
-        int newLevel,
-        bool falling,
-        int sizeX,
-        int sizeY,
-        int sizeZ,
-        Dictionary<(int X, int Y, int Z), (int Level, bool Falling)> placements)
+    private BlockId LevelToBlock(int level)
     {
-        if (x < 0 || y < 0 || z < 0 || x >= sizeX || y >= sizeY || z >= sizeZ)
+        if (level <= 0)
         {
-            return;
+            return BlockId.Water;
         }
 
-        var current = _world.GetBlock(x, y, z);
-
-        if (current == BlockId.Water)
+        if (level > MaximumFluidDepletion)
         {
-            return;
+            return BlockId.Air;
         }
 
-        // Only air and plants can be replaced by flowing water. Existing flow
-        // can be upgraded to a stronger (lower) level.
-        if (current != BlockId.Air && !BlockRegistry.IsPlant(current))
-        {
-            if (!BlockRegistry.IsWaterFlow(current) && current != BlockId.WaterFalling)
-            {
-                return;
-            }
-
-            if (BlockRegistry.WaterLevel(current) <= newLevel)
-            {
-                return;
-            }
-        }
-
-        // Horizontal flow needs support below it.
-        if (!falling && newLevel > 0)
-        {
-            if (y == 0)
-            {
-                return;
-            }
-
-            var below = _world.GetBlock(x, y - 1, z);
-
-            if (!BlockRegistry.Get(below).IsSolid && !BlockRegistry.IsWater(below))
-            {
-                return;
-            }
-        }
-
-        var key = (x, y, z);
-
-        if (placements.TryGetValue(key, out var existing) && existing.Level <= newLevel && existing.Falling == falling)
-        {
-            return;
-        }
-
-        placements[key] = (newLevel, falling);
+        return (BlockId)((int)BlockId.WaterFlow1 + level - 1);
     }
 
-    private bool HasWaterInflow(
-        int x,
-        int y,
-        int z,
-        BlockId block,
-        int sizeX,
-        int sizeY,
-        int sizeZ)
+    private bool LineOfSight(Coordinates3D from, Coordinates3D to)
     {
-        var level = BlockRegistry.WaterLevel(block);
+        var candidate = from;
+        var direction = to - from;
+        direction.Clamp(1);
 
-        // A stronger neighbor can feed this cell.
-        if (x > 0)
+        do
         {
-            var neighbor = _world.GetBlock(x - 1, y, z);
-            if (neighbor == BlockId.Water || (BlockRegistry.IsWaterFlow(neighbor) && BlockRegistry.WaterLevel(neighbor) < level))
+            var z = candidate.Z;
+
+            do
             {
-                return true;
+                var block = GetBlock(candidate);
+
+                if (!IsPassable(block))
+                {
+                    return false;
+                }
+
+                candidate.Z += direction.Z;
             }
-        }
+            while (to.Z != candidate.Z);
 
-        if (x < sizeX - 1)
+            candidate.Z = z;
+            candidate.X += direction.X;
+        }
+        while (to.X != candidate.X);
+
+        return true;
+    }
+
+    private BlockId GetBlock(Coordinates3D coords)
+    {
+        if (!_world.InBounds(coords.X, coords.Y, coords.Z))
         {
-            var neighbor = _world.GetBlock(x + 1, y, z);
-            if (neighbor == BlockId.Water || (BlockRegistry.IsWaterFlow(neighbor) && BlockRegistry.WaterLevel(neighbor) < level))
-            {
-                return true;
-            }
+            return BlockId.Stone;
         }
 
-        if (z > 0)
-        {
-            var neighbor = _world.GetBlock(x, y, z - 1);
-            if (neighbor == BlockId.Water || (BlockRegistry.IsWaterFlow(neighbor) && BlockRegistry.WaterLevel(neighbor) < level))
-            {
-                return true;
-            }
-        }
+        return _world.GetBlock(coords.X, coords.Y, coords.Z);
+    }
 
-        if (z < sizeZ - 1)
-        {
-            var neighbor = _world.GetBlock(x, y, z + 1);
-            if (neighbor == BlockId.Water || (BlockRegistry.IsWaterFlow(neighbor) && BlockRegistry.WaterLevel(neighbor) < level))
-            {
-                return true;
-            }
-        }
+    private bool InBounds(Coordinates3D coords)
+    {
+        return _world.InBounds(coords.X, coords.Y, coords.Z);
+    }
 
-        // Water falling from above feeds this cell.
-        if (y < sizeY - 1 && BlockRegistry.IsWater(_world.GetBlock(x, y + 1, z)))
-        {
-            return true;
-        }
+    private static bool IsPassable(BlockId block)
+    {
+        return block == BlockId.Air || BlockRegistry.IsPlant(block);
+    }
 
-        return false;
+    private IEnumerable<Coordinates3D> Neighbors(Coordinates3D coords)
+    {
+        yield return coords + Coordinates3D.North;
+        yield return coords + Coordinates3D.South;
+        yield return coords + Coordinates3D.East;
+        yield return coords + Coordinates3D.West;
     }
 
     private void UpdatePlants(List<BlockChange> changes)
@@ -421,5 +587,63 @@ public sealed class BlockUpdateService : IDisposable
                 }
             }
         }
+    }
+
+    private struct LiquidFlow
+    {
+        public LiquidFlow(Coordinates3D targetBlock, byte level)
+        {
+            TargetBlock = targetBlock;
+            Level = level;
+        }
+
+        public Coordinates3D TargetBlock;
+        public byte Level;
+    }
+
+    private struct Coordinates3D
+    {
+        public Coordinates3D(int x, int y = 0, int z = 0)
+        {
+            X = x;
+            Y = y;
+            Z = z;
+        }
+
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int Z { get; set; }
+
+        public static Coordinates3D Down => new(0, -1, 0);
+        public static Coordinates3D Up => new(0, 1, 0);
+        public static Coordinates3D North => new(0, 0, -1);
+        public static Coordinates3D South => new(0, 0, 1);
+        public static Coordinates3D East => new(1, 0, 0);
+        public static Coordinates3D West => new(-1, 0, 0);
+
+        public static Coordinates3D operator +(Coordinates3D a, Coordinates3D b) =>
+            new(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
+
+        public static Coordinates3D operator -(Coordinates3D a, Coordinates3D b) =>
+            new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+
+        public void Clamp(int value)
+        {
+        }
+
+        public int DistanceTo(Coordinates3D other) =>
+            Math.Abs(X - other.X) + Math.Abs(Y - other.Y) + Math.Abs(Z - other.Z);
+
+        public static bool operator ==(Coordinates3D left, Coordinates3D right) =>
+            left.X == right.X && left.Y == right.Y && left.Z == right.Z;
+
+        public static bool operator !=(Coordinates3D left, Coordinates3D right) =>
+            !(left == right);
+
+        public override bool Equals(object? obj) =>
+            obj is Coordinates3D other && this == other;
+
+        public override int GetHashCode() =>
+            HashCode.Combine(X, Y, Z);
     }
 }
