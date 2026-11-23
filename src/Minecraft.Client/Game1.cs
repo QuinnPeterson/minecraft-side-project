@@ -186,6 +186,11 @@ public class Game1 : Game
     private IndexBuffer _crackIb;
     private int _crackIndexCount;
 
+    // Position and time of the most recent survival block break, used to skip
+    // the item entity that the server creates for that very break.
+    private Vector3 _localDropPosition = Vector3.Zero;
+    private double _localDropTime = -1;
+
     // Survival health (in half-hearts, 0..20).
     private int _health = 20;
     private bool _wasOnGround;
@@ -312,6 +317,18 @@ public class Game1 : Game
             {
                 if (e.Type != EntityType.Item) continue;
                 if (_pendingPickups.Contains(e.Id)) continue;
+
+                // Skip the drop this client just created with its own break;
+                // that block already went straight into the inventory.
+                var ownDrop = _localDropTime > 0 &&
+                             (_networkTime - _localDropTime) < 2.0 &&
+                             Vector3.Distance(e.Position, _localDropPosition) < 0.75f;
+
+                if (ownDrop)
+                {
+                    continue;
+                }
+
                 var d = Vector3.Distance(e.Position, _position + new Vector3(0, 1f, 0));
                 if (d < 1.5f)
                 {
@@ -1401,6 +1418,12 @@ public class Game1 : Game
 
                 _breakProgress = 0f;
                 _breakCooldown = 0.1f;
+
+                // Remember where this drop was born. The block was already
+                // added to the inventory above, so the pickup pass must not
+                // collect the item entity the server creates for this break.
+                _localDropPosition = new Vector3(_targetX + 0.5f, _targetY + 0.5f, _targetZ + 0.5f);
+                _localDropTime = _networkTime;
             }
 
             return;
@@ -1523,9 +1546,28 @@ public class Game1 : Game
                minZ < playerMaxZ && maxZ > playerMinZ;
     }
 
-    private void AddToSurvivalInventory(int blockId)
+    private void AddToSurvivalInventory(int itemId)
     {
-        if (blockId <= 0 || blockId == (int)BlockId.Air)
+        // Buckets are hotbar state rather than inventory stacks.
+        if (itemId == ItemEmptyBucket || itemId == ItemWaterBucket)
+        {
+            return;
+        }
+
+        if (itemId <= 0)
+        {
+            // Negative ids are item drops from mob deaths (pork, wool, beef,
+            // leather). They are not placeable blocks, so keep them as item
+            // stacks in the main inventory.
+            if (itemId < 0)
+            {
+                _survivalInventory.Add(new InventoryStack { BlockId = itemId, Count = 1 });
+            }
+
+            return;
+        }
+
+        if (itemId == (int)BlockId.Air)
         {
             return;
         }
@@ -1533,7 +1575,7 @@ public class Game1 : Game
         // Try to stack into an existing hotbar slot.
         for (var i = 0; i < HotbarSlots; i++)
         {
-            if (_hotbar[i] == blockId)
+            if (_hotbar[i] == itemId)
             {
                 _survivalHotbarCount[i]++;
                 return;
@@ -1545,15 +1587,16 @@ public class Game1 : Game
         {
             if (_hotbar[i] < 0 || _survivalHotbarCount[i] <= 0)
             {
-                _hotbar[i] = blockId;
+                _hotbar[i] = itemId;
                 _survivalHotbarCount[i] = 1;
                 return;
             }
         }
 
         // Hotbar full: add to main inventory.
-        _survivalInventory.Add(new InventoryStack { BlockId = blockId, Count = 1 });
+        _survivalInventory.Add(new InventoryStack { BlockId = itemId, Count = 1 });
     }
+
     private void SelectSlot(int index, bool announce = true)
     {
         _selectedSlot = Math.Clamp(index, 0, HotbarSlots - 1);
@@ -1567,12 +1610,30 @@ public class Game1 : Game
 
     private static string ItemName(int slot)
     {
-        return slot switch
+        if (slot == ItemEmptyBucket)
         {
-            ItemEmptyBucket => "Empty Bucket",
-            ItemWaterBucket => "Water Bucket",
-            _ => BlockRegistry.Get((BlockId)slot).Name,
-        };
+            return "Empty Bucket";
+        }
+
+        if (slot == ItemWaterBucket)
+        {
+            return "Water Bucket";
+        }
+
+        if (slot < 0)
+        {
+            // Mob drops and other item entities arrive here as negative ids.
+            return slot switch
+            {
+                -10 => "Pork",
+                -11 => "Wool",
+                -12 => "Beef",
+                -13 => "Leather",
+                _ => $"Item {Math.Abs(slot)}",
+            };
+        }
+
+        return BlockRegistry.Get((BlockId)slot).Name;
     }
 
     private void ShowToast(string text)
@@ -2114,7 +2175,7 @@ public class Game1 : Game
             var verts = new List<VertexPositionColor>();
             var inds = new List<int>();
 
-            void AddBox(Vector3 origin, Vector3 min, Vector3 size, Color color)
+            void AddBox(Vector3 origin, Vector3 min, Vector3 size, Color color, Matrix local)
             {
                 var o = origin + min;
                 var start = verts.Count;
@@ -2124,7 +2185,11 @@ public class Game1 : Game
                     new Vector3(0,0,0), new Vector3(size.X,0,0), new Vector3(size.X,0,size.Z), new Vector3(0,0,size.Z),
                     new Vector3(0,size.Y,0), new Vector3(size.X,size.Y,0), new Vector3(size.X,size.Y,size.Z), new Vector3(0,size.Y,size.Z),
                 };
-                for (var i = 0; i < 8; i++) verts.Add(new VertexPositionColor(o + c[i], color));
+                for (var i = 0; i < 8; i++)
+                {
+                    var corner = Vector3.Transform(o + c[i], local);
+                    verts.Add(new VertexPositionColor(corner, color));
+                }
                 // 12 triangles (2 per face)
                 int[] tris = { 0,1,2, 0,2,3, 4,6,5, 4,7,6, 0,4,5, 0,5,1, 2,6,7, 2,7,3, 0,3,7, 0,7,4, 1,5,6, 1,6,2 };
                 foreach (var t in tris) inds.Add(start + t);
@@ -2135,39 +2200,39 @@ public class Game1 : Game
             if (e.Type == EntityType.Pig)
             {
                 // Body
-                AddBox(pos, new Vector3(-0.45f, 0.4f, -0.3f), new Vector3(0.9f, 0.5f, 0.6f), new Color(240, 150, 150));
-                // Head
-                AddBox(pos, new Vector3(-0.75f, 0.5f, -0.25f), new Vector3(0.35f, 0.35f, 0.5f), new Color(240, 150, 150));
+                AddBox(pos, new Vector3(-0.45f, 0.4f, -0.3f), new Vector3(0.9f, 0.5f, 0.6f), new Color(240, 150, 150), Matrix.Identity);
+                // Head (rotated by yaw so the mob looks where it faces).
+                AddBox(pos, new Vector3(-0.75f, 0.5f, -0.25f), new Vector3(0.35f, 0.35f, 0.5f), new Color(240, 150, 150), Matrix.CreateRotationY(e.HeadYaw));
                 // Legs
-                AddBox(pos, new Vector3(-0.35f, 0f, -0.2f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140));
-                AddBox(pos, new Vector3(0.2f, 0f, -0.2f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140));
-                AddBox(pos, new Vector3(-0.35f, 0f, 0.05f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140));
-                AddBox(pos, new Vector3(0.2f, 0f, 0.05f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140));
+                AddBox(pos, new Vector3(-0.35f, 0f, -0.2f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140), Matrix.Identity);
+                AddBox(pos, new Vector3(0.2f, 0f, -0.2f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.35f, 0f, 0.05f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140), Matrix.Identity);
+                AddBox(pos, new Vector3(0.2f, 0f, 0.05f), new Vector3(0.15f, 0.4f, 0.15f), new Color(230, 140, 140), Matrix.Identity);
             }
             else if (e.Type == EntityType.Sheep)
             {
                 // Wool body (fluffy)
-                AddBox(pos, new Vector3(-0.5f, 0.5f, -0.4f), new Vector3(1.0f, 0.7f, 0.8f), new Color(240, 240, 235));
-                // Head
-                AddBox(pos, new Vector3(-0.8f, 0.5f, -0.25f), new Vector3(0.3f, 0.35f, 0.5f), new Color(180, 180, 170));
+                AddBox(pos, new Vector3(-0.5f, 0.5f, -0.4f), new Vector3(1.0f, 0.7f, 0.8f), new Color(240, 240, 235), Matrix.Identity);
+                // Head (rotated by yaw so the sheep looks where it faces).
+                AddBox(pos, new Vector3(-0.8f, 0.5f, -0.25f), new Vector3(0.3f, 0.35f, 0.5f), new Color(180, 180, 170), Matrix.CreateRotationY(e.HeadYaw));
                 // Legs
-                AddBox(pos, new Vector3(-0.4f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70));
-                AddBox(pos, new Vector3(0.28f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70));
-                AddBox(pos, new Vector3(-0.4f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70));
-                AddBox(pos, new Vector3(0.28f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70));
+                AddBox(pos, new Vector3(-0.4f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70), Matrix.Identity);
+                AddBox(pos, new Vector3(0.28f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.4f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70), Matrix.Identity);
+                AddBox(pos, new Vector3(0.28f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 80, 70), Matrix.Identity);
             }
             else if (e.Type == EntityType.Cow)
             {
-                AddBox(pos, new Vector3(-0.5f, 0.5f, -0.4f), new Vector3(1.0f, 0.6f, 0.8f), new Color(120, 80, 50));
-                AddBox(pos, new Vector3(-0.8f, 0.5f, -0.25f), new Vector3(0.3f, 0.35f, 0.5f), new Color(120, 80, 50));
-                AddBox(pos, new Vector3(-0.4f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40));
-                AddBox(pos, new Vector3(0.28f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40));
-                AddBox(pos, new Vector3(-0.4f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40));
-                AddBox(pos, new Vector3(0.28f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40));
+                AddBox(pos, new Vector3(-0.5f, 0.5f, -0.4f), new Vector3(1.0f, 0.6f, 0.8f), new Color(120, 80, 50), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.8f, 0.5f, -0.25f), new Vector3(0.3f, 0.35f, 0.5f), new Color(120, 80, 50), Matrix.CreateRotationY(e.HeadYaw));
+                AddBox(pos, new Vector3(-0.4f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40), Matrix.Identity);
+                AddBox(pos, new Vector3(0.28f, 0f, -0.25f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.4f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40), Matrix.Identity);
+                AddBox(pos, new Vector3(0.28f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40), Matrix.Identity);
             }
             else // Item
             {
-                AddBox(pos, new Vector3(-0.15f, 0f, -0.15f), new Vector3(0.3f, 0.3f, 0.3f), Color.White);
+                AddBox(pos, new Vector3(-0.15f, 0f, -0.15f), new Vector3(0.3f, 0.3f, 0.3f), Color.White, Matrix.Identity);
             }
 
             if (verts.Count == 0) continue;
