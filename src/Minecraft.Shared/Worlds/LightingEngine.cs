@@ -137,8 +137,7 @@ public sealed class LightingEngine
     private static byte SkyLightForTime(float timeOfDay)
     {
         var hours = Math.Clamp(timeOfDay, 0f, 24f);
-        var elevation = (float)Math.Sin((hours - 6f) / 24f * Math.PI * 2f);
-        return (byte)(MaxLight * Math.Clamp(elevation, 0f, 1f));
+        return (byte)(MaxLight * Daylight.Level(hours));
     }
 
     /// <summary>Recomputes every light source in the world at a given time of day.</summary>

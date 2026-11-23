@@ -310,4 +310,15 @@ public static class WorldProtocol
 
     public static int ReadEntityRemove(NetBuffer message) => message.ReadInt32();
 
+    public static NetOutgoingMessage CreateTimeUpdate(NetPeer peer, string groupId, float hours)
+    {
+        var message = peer.CreateMessage(16 + groupId.Length);
+        message.Write((byte)PacketType.TimeUpdate);
+        message.Write(groupId);
+        message.Write(hours);
+        return message;
+    }
+
+    public static float ReadTimeUpdate(NetBuffer message) => message.ReadFloat();
+
 }

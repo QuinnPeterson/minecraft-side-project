@@ -148,6 +148,10 @@ internal static class Program
                 KickPlayer(parts);
                 return true;
 
+            case "time":
+                SetTime(parts);
+                return true;
+
             case "quit":
             case "exit":
                 return false;
@@ -156,6 +160,52 @@ internal static class Program
                 Console.WriteLine($"Unknown command '{parts[0]}'. Type 'help' for a list.");
                 return true;
         }
+    }
+
+    private static void SetTime(string[] parts)
+    {
+        if (parts.Length == 1)
+        {
+            var current = _network.TimeOfDay;
+            var phase = current >= 6f && current < 18f ? "day" : "night";
+            Console.WriteLine($"Time: {current:0.0}:00 ({phase})");
+            Console.WriteLine("Usage: time [set] <0-24> | time day | time night | time dawn | time dusk");
+            return;
+        }
+
+        float hours;
+
+        switch (parts[1].ToLowerInvariant())
+        {
+            case "day":
+                hours = 12f;
+                break;
+            case "night":
+                hours = 0f;
+                break;
+            case "dawn":
+                hours = 6f;
+                break;
+            case "dusk":
+                hours = 18f;
+                break;
+            case "set":
+                if (parts.Length != 3 || !float.TryParse(parts[2], out hours))
+                {
+                    Console.WriteLine("Usage: time set <0-24>");
+                    return;
+                }
+                break;
+            default:
+                if (!float.TryParse(parts[1], out hours))
+                {
+                    Console.WriteLine("Usage: time [set] <0-24> | time day | time night | time dawn | time dusk");
+                    return;
+                }
+                break;
+        }
+
+        _network.SetTimeOfDay(hours);
     }
 
     private static void SetBlock(string[] parts)
@@ -277,6 +327,7 @@ internal static class Program
         Console.WriteLine("  get <x> <y> <z>               Read a block");
         Console.WriteLine("  set <x> <y> <z> <block>       Place a block (updates all clients live)");
         Console.WriteLine("  kick <username>               Disconnect a player");
+        Console.WriteLine("  time [set <0-24>|day|night|dawn|dusk]  Show or change the time of day");
         Console.WriteLine("  help                          Show this help");
         Console.WriteLine("  quit                          Stop the server");
         Console.WriteLine();

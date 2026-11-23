@@ -60,6 +60,7 @@ internal sealed class NetworkServer
     private readonly List<ServerEntity> _entities = new();
     private int _nextEntityId = 1;
     private float _spawnTimer = 5f;
+    private float _timeOfDay = 12f;
     private readonly ConcurrentDictionary<NetConnection, ConcurrentQueue<NetOutgoingMessage>> _pending = new();
     private readonly ConcurrentDictionary<NetConnection, Queue<ChunkRequest>> _chunkStreams = new();
     private readonly Action<string> _log;
@@ -93,6 +94,25 @@ internal sealed class NetworkServer
     }
 
     public NetServer NetServer => _netServer;
+
+    /// <summary>Current in-game hour (0..24), authoritative on the server.</summary>
+    public float TimeOfDay => _timeOfDay;
+
+    /// <summary>Sets the time of day and tells every client to update its sky.</summary>
+    public void SetTimeOfDay(float hours)
+    {
+        _timeOfDay = Math.Clamp(hours, 0f, 24f);
+        _log($"Time set to {_timeOfDay:0.0}:00 ({(_timeOfDay >= 6f && _timeOfDay < 18f ? "day" : "night")}).");
+
+        // The console loop starts before the network thread in some launches;
+        // late joiners still receive the current time on connect.
+        if (_netServer is null)
+        {
+            return;
+        }
+
+        Broadcast(WorldProtocol.CreateTimeUpdate(_netServer, DefaultGroupId, _timeOfDay));
+    }
 
     public IReadOnlyList<PlayerConnection> GetPlayers()
     {
@@ -140,6 +160,14 @@ internal sealed class NetworkServer
                 ProcessIncoming();
                 StreamChunks();
                 TickEntities();
+
+                // Keep the authoritative clock moving so `time` and late
+                // joiners reflect the current hour (ten real minutes per day).
+                _timeOfDay += (float)TickRate.Interval.TotalSeconds / 600f;
+                if (_timeOfDay >= 24f)
+                {
+                    _timeOfDay -= 24f;
+                }
 
                 nextTick += TickRate.Interval;
                 var remaining = nextTick - stopwatch.Elapsed;
@@ -384,12 +412,19 @@ internal sealed class NetworkServer
         var reason = message.ReadString();
         var connection = message.SenderConnection;
 
-        if (status == NetConnectionStatus.Connected && _pending.TryRemove(connection, out var queued))
+        if (status == NetConnectionStatus.Connected)
         {
-            while (queued.TryDequeue(out var packet))
+            if (_pending.TryRemove(connection, out var queued))
             {
-                _netServer.SendMessage(packet, connection, NetDeliveryMethod.ReliableOrdered, 0);
+                while (queued.TryDequeue(out var packet))
+                {
+                    _netServer.SendMessage(packet, connection, NetDeliveryMethod.ReliableOrdered, 0);
+                }
             }
+
+            // Give late joiners the current time so their sky matches everyone else's.
+            var timeMessage = WorldProtocol.CreateTimeUpdate(_netServer, DefaultGroupId, _timeOfDay);
+            _netServer.SendMessage(timeMessage, connection, NetDeliveryMethod.ReliableOrdered, 0);
         }
 
         if (status != NetConnectionStatus.Disconnected)

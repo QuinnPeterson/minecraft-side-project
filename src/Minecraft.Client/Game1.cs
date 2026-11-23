@@ -60,11 +60,17 @@ public class Game1 : Game
     {
         get
         {
-            var hours = Math.Clamp(_timeOfDay, 0.0, 24.0);
-            var elevation = (float)Math.Sin((hours - 6.0) / 24.0 * Math.PI * 2.0);
-            var daylight = Math.Clamp(elevation, 0f, 1f);
+            var daylight = Daylight.Level((float)Math.Clamp(_timeOfDay, 0.0, 24.0));
             return Color.Lerp(new Color(8, 12, 34, 255), new Color(135, 206, 235, 255), daylight);
         }
+    }
+
+    private void SetTimeOfDay(double hours)
+    {
+        _timeOfDay = Math.Clamp(hours, 0.0, 24.0);
+        _lastLightingHour = -1.0;
+        _lastSkyHour = -1.0;
+        ShowToast($"Time: {_timeOfDay:0.0}:00");
     }
 
     private double _timeOfDay = 12.0;
@@ -289,7 +295,11 @@ public class Game1 : Game
                 var dx = x - 127.5f;
                 var dy = y - 127.5f;
                 var dist = MathF.Sqrt(dx * dx + dy * dy) / 128f;
-                celestialPixels[y * 256 + x] = new Color((byte)255, (byte)255, (byte)255, (byte)(MathF.Max(0f, 1f - dist) * 255));
+                // Solid core with a short soft rim, so the small on-screen disc
+                // reads as a circle rather than a faded square.
+                var alpha = dist <= 0.72f ? 1f : Math.Clamp((1f - dist) / 0.28f, 0f, 1f);
+                var shade = (byte)(alpha * 255);
+                celestialPixels[y * 256 + x] = new Color(shade, shade, shade, (byte)255);
             }
         }
 
@@ -520,7 +530,7 @@ public class Game1 : Game
         GraphicsDevice.SamplerStates[0] = SamplerState.PointClamp;
         GraphicsDevice.RasterizerState = RasterizerState.CullNone;
 
-        DrawDayNightSky(view, projection);
+        DrawDayNightSky(view, projection, rotation.Forward);
 
         _texturedEffect.View = view;
         _texturedEffect.Projection = projection;
@@ -661,61 +671,71 @@ public class Game1 : Game
     /// follows the current time of day. Replaces the plain clear colour while
     /// the world is being drawn.
     /// </summary>
-    private void DrawDayNightSky(Matrix view, Matrix projection)
+    private void DrawDayNightSky(Matrix view, Matrix projection, Vector3 cameraForward)
     {
         var viewport = GraphicsDevice.Viewport;
         var width = viewport.Width;
         var height = viewport.Height;
 
         var hours = Math.Clamp(_timeOfDay, 0.0, 24.0);
-        var elevation = (float)Math.Sin((hours - 6.0) / 24.0 * Math.PI * 2.0);
-        var daylight = Math.Clamp(elevation, 0f, 1f);
+        var sunAngle = (hours - 6.0) / 24.0 * Math.PI * 2.0;
+        var elevation = Daylight.SunElevation((float)hours);
+        var daylight = Daylight.Level((float)hours);
 
         if (Math.Floor(_timeOfDay) != _lastSkyHour)
         {
-            RebuildSkyGradient((float)Math.Clamp(_timeOfDay % 24.0, 0.0, 24.0));
-            _lastSkyHour = (float)Math.Floor(_timeOfDay);
+            RebuildSkyGradient(daylight);
+            _lastSkyHour = Math.Floor(_timeOfDay);
         }
 
+        // The gradient already contains the night/day colours, so draw it unmodified.
         _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.LinearClamp, DepthStencilState.None, RasterizerState.CullNone);
-        _spriteBatch.Draw(_skyGradient, new Rectangle(0, 0, width, height), SkyColor);
+        _spriteBatch.Draw(_skyGradient, new Rectangle(0, 0, width, height), Color.White);
         _spriteBatch.End();
 
-        var angle = (float)((hours - 6.0) / 12.0 * Math.PI);
-        var sunDirection = new Vector3(
-            (float)Math.Cos(angle) * (float)Math.Cos(elevation),
-            (float)Math.Sin(elevation),
-            (float)Math.Sin(angle) * (float)Math.Cos(elevation));
-        var sunPosition = _position + new Vector3(0f, EyeHeight, 0f) + sunDirection * 160f;
-        var sunScreen = viewport.Project(sunPosition, view, projection, Matrix.Identity);
+        // The celestial bodies travel opposite arcs across the sky. The arcs
+        // are tilted toward -Z (the spawn view direction) so they are actually
+        // visible while looking around instead of always being off to the side.
+        var sunDirection = Vector3.Normalize(new Vector3(
+            (float)Math.Cos(sunAngle) * 0.55f,
+            elevation * 0.25f,
+            -0.9f));
 
-        if (daylight > 0.05f)
+        var isDay = daylight > 0.05f;
+        var bodyDirection = isDay
+            ? sunDirection
+            : Vector3.Normalize(new Vector3(-sunDirection.X, -sunDirection.Y * 0.6f, -0.9f));
+        var bodyTint = isDay ? new Color(255, 245, 205) : new Color(225, 230, 255);
+
+        // Do not draw a body that is behind the camera: perspective projection
+        // of a point behind the near plane lands at mirrored screen coordinates.
+        if (Vector3.Dot(bodyDirection, cameraForward) <= 0f)
         {
-
-            var sunRadius = (int)Math.Clamp(Math.Min(width, height) / 22f, 10f, 64f);
-            _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.LinearClamp, DepthStencilState.None, RasterizerState.CullNone);
-            _spriteBatch.Draw(_celestialBody, new Rectangle(
-                (int)Math.Round(sunScreen.X - sunRadius / 2f),
-                (int)Math.Round(sunScreen.Y - sunRadius / 2f),
-                sunRadius,
-                sunRadius), Color.White);
-            _spriteBatch.End();
+            return;
         }
-        else
+
+        var bodyPosition = _position + new Vector3(0f, EyeHeight, 0f) + bodyDirection * 160f;
+        var clip = Vector4.Transform(bodyPosition, view * projection);
+        if (clip.W <= 0f)
         {
-            var moonDirection = -sunDirection;
-            var moonPosition = _position + new Vector3(0f, EyeHeight, 0f) + moonDirection * 160f;
-            var moonScreen = viewport.Project(moonPosition, view, projection, Matrix.Identity);
-
-            var moonRadius = (int)Math.Clamp(Math.Min(width, height) / 22f, 10f, 64f);
-            _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.LinearClamp, DepthStencilState.None, RasterizerState.CullNone);
-            _spriteBatch.Draw(_celestialBody, new Rectangle(
-                (int)Math.Round(moonScreen.X - moonRadius / 2f),
-                (int)Math.Round(moonScreen.Y - moonRadius / 2f),
-                moonRadius,
-                moonRadius), new Color(230, 230, 255));
-            _spriteBatch.End();
+            return;
         }
+
+        var ndc = new Vector3(clip.X / clip.W, clip.Y / clip.W, clip.Z / clip.W);
+        var bodyScreen = new Vector3(
+            (ndc.X + 1f) * 0.5f * width,
+            (1f - ndc.Y) * 0.5f * height,
+            ndc.Z);
+
+        var bodyRadius = (int)Math.Clamp(Math.Min(width, height) / 14f, 16f, 96f);
+
+        _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.Additive, SamplerState.LinearClamp, DepthStencilState.None, RasterizerState.CullNone);
+        _spriteBatch.Draw(_celestialBody, new Rectangle(
+            (int)Math.Round(bodyScreen.X - bodyRadius / 2f),
+            (int)Math.Round(bodyScreen.Y - bodyRadius / 2f),
+            bodyRadius,
+            bodyRadius), bodyTint);
+        _spriteBatch.End();
     }
 
     private void RebuildSkyGradient(float daylight)
@@ -1792,6 +1812,11 @@ public class Game1 : Game
         while (_network.WorldInfos.TryDequeue(out var info))
         {
             InitializeWorld(info);
+        }
+
+        while (_network.TimeUpdates.TryDequeue(out var hours))
+        {
+            SetTimeOfDay(hours);
         }
 
         while (_network.Chunks.TryDequeue(out var chunk))

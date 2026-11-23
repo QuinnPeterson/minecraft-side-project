@@ -72,6 +72,7 @@ internal sealed class ManagerNetwork : IDisposable
     public ConcurrentQueue<(int Id, float X, float Y, float Z, float Yaw)> EntityUpdates { get; } = new();
     public ConcurrentQueue<int> EntityRemoves { get; } = new();
     public ConcurrentQueue<int> EntityHits { get; } = new();
+    public ConcurrentQueue<float> TimeUpdates { get; } = new();
 
     public void Start()
     {
@@ -264,6 +265,10 @@ internal sealed class ManagerNetwork : IDisposable
 
             case PacketType.EntityHit:
                 EntityHits.Enqueue(WorldProtocol.ReadEntityHit(message));
+                break;
+
+            case PacketType.TimeUpdate:
+                TimeUpdates.Enqueue(WorldProtocol.ReadTimeUpdate(message));
                 break;
 
             case PacketType.Kick:

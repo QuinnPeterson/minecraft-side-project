@@ -91,8 +91,11 @@ orange and blue, at noon the surface is fully lit, and at night the sun is
 replaced by a moon while the sky light drops to zero (torches and lava still
 glow). The background is a vertical gradient, and the sun and moon are discs
 projected from a direction that rotates across the sky; the moon is always
-opposite the sun. World lighting is recomputed once per in-game hour, and only
-the affected chunk meshes are rebuilt.
+opposite the sun. The server owns the clock: use `time` in the server console
+to see the hour, or `time set <0-24>`, `time day`, `time night`, `time dawn`,
+and `time dusk` to change it for every connected client. World lighting is
+recomputed once per in-game hour, and only the affected chunk meshes are
+rebuilt.
 
 ## Fluids
 
@@ -142,6 +145,7 @@ The console server keeps these commands:
 blocks                        List every registered block
 stats                         Count blocks in the world
 players                       List connected players
+time [set <0-24>|day|night|dawn|dusk]  Show or change the time of day
 get <x> <y> <z>               Read a block
 set <x> <y> <z> <block>       Place a block (updates all clients live)
 kick <username>               Disconnect a player

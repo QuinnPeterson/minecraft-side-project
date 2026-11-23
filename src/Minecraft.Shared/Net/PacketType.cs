@@ -20,4 +20,5 @@ public enum PacketType : byte
     EntityRemove,
     EntityPickup,
     EntityHit,
+    TimeUpdate,
 }
