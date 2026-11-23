@@ -81,7 +81,7 @@ public static class BlockRaycaster
             {
                 var block = world.GetBlock(x, y, z);
 
-                if (block != BlockId.Air && BlockRegistry.Get(block).IsSolid)
+                if (BlockRegistry.IsTargetable(block))
                 {
                     blockX = x;
                     blockY = y;

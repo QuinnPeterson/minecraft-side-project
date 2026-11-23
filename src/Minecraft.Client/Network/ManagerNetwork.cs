@@ -11,6 +11,7 @@ using System.Threading;
 using LetsCreateNetworkGame.OpenGL.Library;
 using Lidgren.Network;
 using Minecraft.Shared.Blocks;
+using Minecraft.Shared.Entities;
 using Minecraft.Shared.Net;
 using Minecraft.Shared.Worlds;
 
@@ -37,6 +38,7 @@ internal sealed class ManagerNetwork : IDisposable
     private bool _active;
     private long _tickCount;
     private long _nextConnectTick;
+    private volatile int _worldHeight = World.DefaultHeight;
     private Position _localPosition = new();
 
     public ManagerNetwork(string host, int port, string groupId, string username)
@@ -53,7 +55,9 @@ internal sealed class ManagerNetwork : IDisposable
 
     public bool Active => _active;
 
-    public ConcurrentQueue<World> Snapshots { get; } = new();
+    public ConcurrentQueue<WorldInfo> WorldInfos { get; } = new();
+
+    public ConcurrentQueue<ChunkSnapshot> Chunks { get; } = new();
 
     public ConcurrentQueue<BlockChange> Changes { get; } = new();
 
@@ -64,6 +68,10 @@ internal sealed class ManagerNetwork : IDisposable
     public ConcurrentQueue<string> Statuses { get; } = new();
 
     public ConcurrentQueue<string> Kicks { get; } = new();
+    public ConcurrentQueue<EntitySnapshot> EntitySpawns { get; } = new();
+    public ConcurrentQueue<(int Id, float X, float Y, float Z, float Yaw)> EntityUpdates { get; } = new();
+    public ConcurrentQueue<int> EntityRemoves { get; } = new();
+    public ConcurrentQueue<int> EntityHits { get; } = new();
 
     public void Start()
     {
@@ -99,6 +107,26 @@ internal sealed class ManagerNetwork : IDisposable
     public void SendBlockChange(int x, int y, int z, BlockId block)
     {
         _outgoingBlocks.Enqueue(new BlockChange(x, y, z, block));
+    }
+
+    public void SendEntityPickup(int entityId)
+    {
+        if (!_active) return;
+        var message = _client.CreateMessage();
+        message.Write((byte)PacketType.EntityPickup);
+        message.Write(GroupId);
+        message.Write(entityId);
+        _client.SendMessage(message, NetDeliveryMethod.ReliableOrdered);
+    }
+
+    public void SendEntityHit(int entityId)
+    {
+        if (!_active) return;
+        var message = _client.CreateMessage();
+        message.Write((byte)PacketType.EntityHit);
+        message.Write(GroupId);
+        message.Write(entityId);
+        _client.SendMessage(message, NetDeliveryMethod.ReliableOrdered);
     }
 
     public void Dispose()
@@ -207,12 +235,35 @@ internal sealed class ManagerNetwork : IDisposable
                 PlayerUpdates.Enqueue(PlayerProtocol.ReadPlayer(message));
                 break;
 
-            case PacketType.WorldSnapshot:
-                Snapshots.Enqueue(WorldProtocol.ReadWorldSnapshot(message));
+            case PacketType.WorldInfo:
+                var info = WorldProtocol.ReadWorldInfo(message);
+                _worldHeight = info.SizeY;
+                WorldInfos.Enqueue(info);
+                break;
+
+            case PacketType.ChunkSnapshot:
+                Chunks.Enqueue(WorldProtocol.ReadChunkSnapshot(message, _worldHeight));
                 break;
 
             case PacketType.BlockUpdate:
                 Changes.Enqueue(WorldProtocol.ReadBlockUpdate(message));
+                break;
+
+            case PacketType.EntitySpawn:
+                EntitySpawns.Enqueue(WorldProtocol.ReadEntitySpawn(message));
+                break;
+
+            case PacketType.EntityUpdate:
+                var (uid, ux, uy, uz, uyaw) = WorldProtocol.ReadEntityUpdate(message);
+                EntityUpdates.Enqueue((uid, ux, uy, uz, uyaw));
+                break;
+
+            case PacketType.EntityRemove:
+                EntityRemoves.Enqueue(WorldProtocol.ReadEntityRemove(message));
+                break;
+
+            case PacketType.EntityHit:
+                EntityHits.Enqueue(WorldProtocol.ReadEntityHit(message));
                 break;
 
             case PacketType.Kick:

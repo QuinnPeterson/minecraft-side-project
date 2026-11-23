@@ -7,23 +7,41 @@ namespace Minecraft.Server;
 
 internal static class Program
 {
-    private const int WorldSizeX = 32;
-    private const int WorldSizeZ = 32;
+    private const int WorldSizeX = 128;
+    private const int WorldSizeZ = 128;
+    private const int WorldHeight = 128;
 
     private static World _world = null!;
     private static NetworkServer _network = null!;
     private static Thread _networkThread = null!;
     private static CancellationTokenSource _stop = null!;
 
-    private static void Main()
+    private static void Main(string[] args)
     {
         Console.Title = "Minecraft Server";
 
         Console.WriteLine("=== Minecraft Server ===");
         Console.WriteLine();
 
-        _world = FlatWorldGenerator.Generate(WorldSizeX, WorldSizeZ);
-        _network = new NetworkServer(_world, message => Console.WriteLine(message));
+        var seedText = Environment.GetEnvironmentVariable("MINECRAFT_SEED");
+        var seed = int.TryParse(seedText, out var requestedSeed)
+            ? requestedSeed
+            : Random.Shared.Next();
+
+        Console.WriteLine($"Generating a {WorldSizeX} x {WorldHeight} x {WorldSizeZ} world (seed {seed})...");
+        var started = DateTime.UtcNow;
+        var generated = TerrainGenerator.Generate(WorldSizeX, WorldSizeZ, WorldHeight, seed);
+        _world = generated.World;
+        Console.WriteLine($"Terrain generated in {(DateTime.UtcNow - started).TotalSeconds:0.0}s.");
+        Console.WriteLine($"Spawn: {generated.SpawnX},{generated.SpawnY},{generated.SpawnZ}");
+
+        _network = new NetworkServer(
+            _world,
+            generated.Seed,
+            generated.SpawnX,
+            generated.SpawnY,
+            generated.SpawnZ,
+            message => Console.WriteLine(message));
 
         Console.WriteLine($"World size: {_world.SizeX} x {_world.SizeY} x {_world.SizeZ}");
         Console.WriteLine($"{BlockRegistry.All.Count} block types loaded from the shared library:");
@@ -33,14 +51,35 @@ internal static class Program
         PrintHelp();
         StartNetwork();
 
-        while (true)
-        {
-            Console.Write("> ");
-            var input = Console.ReadLine();
+        var headless = args.Any(arg =>
+                           string.Equals(arg, "--headless", StringComparison.OrdinalIgnoreCase)) ||
+                       Environment.GetEnvironmentVariable("MINECRAFT_HEADLESS") == "1";
 
-            if (input is null || !Execute(input))
+        if (headless)
+        {
+            // Hosted runs have no interactive console. Stay up until the process
+            // is stopped (Ctrl+C cancels the wait cleanly when attached to one).
+            using var stopSignal = new ManualResetEventSlim(false);
+            Console.CancelKeyPress += (_, eventArgs) =>
             {
-                break;
+                eventArgs.Cancel = true;
+                stopSignal.Set();
+            };
+
+            Console.WriteLine("Headless mode: press Ctrl+C to stop.");
+            stopSignal.Wait();
+        }
+        else
+        {
+            while (true)
+            {
+                Console.Write("> ");
+                var input = Console.ReadLine();
+
+                if (input is null || !Execute(input))
+                {
+                    break;
+                }
             }
         }
 

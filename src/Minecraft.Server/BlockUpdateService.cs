@@ -10,6 +10,10 @@ namespace LetsCreateNetworkGame.Server;
 /// Runs block simulation on a dedicated thread. Water uses a TrueCraft-style
 /// cellular automaton: each fluid block examines its neighbors and nearest
 /// drop-offs, then flows outward or settles.
+///
+/// Unlike the old full-world scan, only cells near an edit are active. Oceans
+/// generated at world creation therefore cost nothing, while digging next to
+/// water still makes it flow into the hole.
 /// </summary>
 public sealed class BlockUpdateService : IDisposable
 {
@@ -18,12 +22,17 @@ public sealed class BlockUpdateService : IDisposable
     private const int MaximumFluidDepletion = 7;
     private const int DropCheckDistance = 2;
     private const int PlantGrowthIntervalTicks = 20;
+    private const int PlantGrowthSamples = 1024;
+    private const int MaximumActiveCells = 24000;
+    private const int MaximumCellsPerTick = 3500;
 
     private readonly World _world;
     private readonly object _worldSync;
     private readonly Action<BlockChange> _broadcast;
     private readonly Action<string> _log;
     private readonly ConcurrentQueue<BlockChange> _edits = new();
+    private readonly HashSet<(int X, int Y, int Z)> _active = new();
+    private readonly object _activeSync = new();
     private readonly Thread _thread;
     private volatile bool _running;
     private int _tickCounter;
@@ -103,35 +112,22 @@ public sealed class BlockUpdateService : IDisposable
         var changes = new List<BlockChange>();
 
         DrainEdits(changes);
-
-        // Snapshot water cells so a block updated this tick is not processed
-        // again until the next tick.
-        var waterCells = new List<(int X, int Y, int Z)>();
-
-        lock (_worldSync)
-        {
-            for (var x = 0; x < _world.SizeX; x++)
-            for (var y = 0; y < _world.SizeY; y++)
-            for (var z = 0; z < _world.SizeZ; z++)
-            {
-                if (BlockRegistry.IsWater(_world.GetBlock(x, y, z)))
-                {
-                    waterCells.Add((x, y, z));
-                }
-            }
-        }
-
-        foreach (var (x, y, z) in waterCells)
-        {
-            DoAutomata(changes, x, y, z);
-        }
+        ProcessActiveCells(changes);
 
         if (_tickCounter % PlantGrowthIntervalTicks == 0)
         {
-            UpdatePlants(changes);
+            GrowPlants(changes);
         }
 
+        // Collapse repeated edits so clients receive the final state of a cell.
+        var final = new Dictionary<(int X, int Y, int Z), BlockChange>();
+
         foreach (var change in changes)
+        {
+            final[(change.X, change.Y, change.Z)] = change;
+        }
+
+        foreach (var change in final.Values)
         {
             _broadcast(change);
         }
@@ -156,79 +152,214 @@ public sealed class BlockUpdateService : IDisposable
                 if (_world.SetBlock(change.X, change.Y, change.Z, change.Block))
                 {
                     changes.Add(change);
+                    Activate(change.X, change.Y, change.Z);
                 }
             }
         }
     }
 
+    private void ProcessActiveCells(List<BlockChange> changes)
+    {
+        List<(int X, int Y, int Z)> batch;
+
+        lock (_activeSync)
+        {
+            if (_active.Count == 0)
+            {
+                return;
+            }
+
+            batch = new List<(int X, int Y, int Z)>(Math.Min(_active.Count, MaximumCellsPerTick));
+
+            foreach (var cell in _active)
+            {
+                batch.Add(cell);
+
+                if (batch.Count >= MaximumCellsPerTick)
+                {
+                    break;
+                }
+            }
+
+            foreach (var cell in batch)
+            {
+                _active.Remove(cell);
+            }
+        }
+
+        foreach (var (x, y, z) in batch)
+        {
+            lock (_worldSync)
+            {
+                UpdateCell(changes, x, y, z);
+            }
+        }
+    }
+
+    private void UpdateCell(List<BlockChange> changes, int x, int y, int z)
+    {
+        if (!_world.InBounds(x, y, z))
+        {
+            return;
+        }
+
+        var block = _world.GetBlock(x, y, z);
+
+        if (BlockRegistry.IsWater(block))
+        {
+            DoAutomata(changes, x, y, z);
+            return;
+        }
+
+        if (block is BlockId.Sand or BlockId.Gravel)
+        {
+            DoFallingBlock(changes, x, y, z, block);
+            return;
+        }
+
+        if (BlockRegistry.IsPlant(block))
+        {
+            DoPlantSupport(changes, x, y, z, block);
+        }
+    }
+
+    private void DoFallingBlock(List<BlockChange> changes, int x, int y, int z, BlockId block)
+    {
+        var below = y - 1;
+
+        if (below < 0)
+        {
+            return;
+        }
+
+        var target = _world.GetBlock(x, below, z);
+
+        if (target != BlockId.Air && !BlockRegistry.IsPlant(target) && !BlockRegistry.IsWater(target))
+        {
+            return;
+        }
+
+        SetBlock(changes, x, y, z, BlockId.Air);
+        SetBlock(changes, x, below, z, block);
+
+        Activate(x, below, z);
+    }
+
+    private void DoPlantSupport(List<BlockChange> changes, int x, int y, int z, BlockId block)
+    {
+        if (y == 0)
+        {
+            SetBlock(changes, x, y, z, BlockId.Air);
+            return;
+        }
+
+        var below = _world.GetBlock(x, y - 1, z);
+
+        if (BlockRegistry.IsCrop(block))
+        {
+            if (below is BlockId.Farmland or BlockId.Dirt or BlockId.Grass)
+            {
+                return;
+            }
+
+            SetBlock(changes, x, y, z, BlockId.Air);
+            return;
+        }
+
+        if (block == BlockId.SugarCane)
+        {
+            if (below == BlockId.SugarCane)
+            {
+                return;
+            }
+
+            var supported = below is BlockId.Grass or BlockId.Dirt or BlockId.Sand;
+            var wet = BlockRegistry.IsWater(_world.GetBlock(x + 1, y - 1, z)) ||
+                      BlockRegistry.IsWater(_world.GetBlock(x - 1, y - 1, z)) ||
+                      BlockRegistry.IsWater(_world.GetBlock(x, y - 1, z + 1)) ||
+                      BlockRegistry.IsWater(_world.GetBlock(x, y - 1, z - 1));
+
+            if (supported && wet)
+            {
+                return;
+            }
+
+            SetBlock(changes, x, y, z, BlockId.Air);
+            return;
+        }
+
+        if (below is BlockId.Grass or BlockId.Dirt or BlockId.Sand or BlockId.Farmland)
+        {
+            return;
+        }
+
+        SetBlock(changes, x, y, z, BlockId.Air);
+    }
+
     private void DoAutomata(List<BlockChange> changes, int x, int y, int z)
     {
-        lock (_worldSync)
+        if (!_world.InBounds(x, y, z))
         {
-            if (!_world.InBounds(x, y, z))
+            return;
+        }
+
+        var current = _world.GetBlock(x, y, z);
+
+        if (!BlockRegistry.IsWater(current))
+        {
+            return;
+        }
+
+        var coords = new Coordinates3D(x, y, z);
+        var previousLevel = BlockRegistry.WaterLevel(current);
+
+        if (previousLevel < 0)
+        {
+            previousLevel = 0;
+        }
+
+        var inward = DetermineInwardFlow(coords);
+        var outward = DetermineOutwardFlow(coords, previousLevel);
+
+        // Flowing down takes priority for non-source water.
+        if (outward.Length == 1 &&
+            outward[0].TargetBlock == coords + Coordinates3D.Down &&
+            previousLevel != 0)
+        {
+            FlowOutward(changes, outward[0]);
+            return;
+        }
+
+        // Inward flow (neighboring water levels feeding this cell).
+        if (inward > MaximumFluidDepletion)
+        {
+            SetBlock(changes, x, y, z, BlockId.Air);
+            return;
+        }
+
+        if (inward != previousLevel)
+        {
+            SetBlock(changes, x, y, z, LevelToBlock(inward));
+
+            if (inward == 0 && previousLevel != 0)
             {
+                // Became a source block; neighbors should re-evaluate next tick.
+                ActivateNeighbors(x, y, z);
                 return;
             }
+        }
 
-            var current = _world.GetBlock(x, y, z);
-
-            if (!BlockRegistry.IsWater(current))
-            {
-                return;
-            }
-
-            var coords = new Coordinates3D(x, y, z);
-            var previousLevel = BlockRegistry.WaterLevel(current);
-            if (previousLevel < 0)
-            {
-                previousLevel = 0;
-            }
-
-            var inward = DetermineInwardFlow(coords);
-            var outward = DetermineOutwardFlow(coords, previousLevel);
-
-            // Flowing down takes priority for non-source water.
-            if (outward.Length == 1 &&
-                outward[0].TargetBlock == coords + Coordinates3D.Down &&
-                previousLevel != 0)
-            {
-                FlowOutward(changes, outward[0]);
-                return;
-            }
-
-            // Inward flow.
-            if (inward > MaximumFluidDepletion)
-            {
-                if (_world.SetBlock(x, y, z, BlockId.Air))
-                {
-                    changes.Add(new BlockChange(x, y, z, BlockId.Air));
-                }
-
-                return;
-            }
-
-            if (inward != previousLevel)
-            {
-                SetWaterLevel(coords, inward);
-
-                if (inward == 0 && previousLevel != 0)
-                {
-                    // Became a source block.
-                    return;
-                }
-            }
-
-            // Outward flow.
-            foreach (var flow in outward)
-            {
-                FlowOutward(changes, flow);
-            }
+        // Outward flow.
+        foreach (var flow in outward)
+        {
+            FlowOutward(changes, flow);
         }
     }
 
     private byte DetermineInwardFlow(Coordinates3D coords)
     {
         var currentLevel = BlockRegistry.WaterLevel(_world.GetBlock(coords.X, coords.Y, coords.Z));
+
         if (currentLevel < 0)
         {
             currentLevel = 0;
@@ -259,6 +390,7 @@ public sealed class BlockUpdateService : IDisposable
             }
 
             var neighborLevel = BlockRegistry.WaterLevel(neighborBlock);
+
             if (neighborLevel < 0)
             {
                 neighborLevel = 0;
@@ -397,8 +529,8 @@ public sealed class BlockUpdateService : IDisposable
             }
         }
 
-        // Occasionally there are scenarios where the nearest candidate hole is
-        // not acceptable, but there is space immediately next to the block.
+        // Occasionally the nearest candidate hole is not acceptable, but there
+        // is space immediately next to the block.
         if (outwardFlow.Count == 0 && !BlockRegistry.IsWater(GetBlock(below)))
         {
             foreach (var neighbor in Neighbors(coords))
@@ -434,39 +566,39 @@ public sealed class BlockUpdateService : IDisposable
             return;
         }
 
-        var level = flow.Level;
+        var level = Math.Min((int)flow.Level, MaximumFluidDepletion);
+        var block = LevelToBlock(level);
 
-        if (level > MaximumFluidDepletion)
-        {
-            level = MaximumFluidDepletion;
-        }
-
-        SetWaterLevel(flow.TargetBlock, level);
-
-        changes.Add(new BlockChange(
+        SetBlock(
+            changes,
             flow.TargetBlock.X,
             flow.TargetBlock.Y,
             flow.TargetBlock.Z,
-            LevelToBlock(level)));
+            block);
+
+        Activate(flow.TargetBlock.X, flow.TargetBlock.Y, flow.TargetBlock.Z);
     }
 
-    private void SetWaterLevel(Coordinates3D coords, int level)
+    private void SetBlock(List<BlockChange> changes, int x, int y, int z, BlockId block)
     {
-        if (level <= 0)
+        if (!_world.InBounds(x, y, z))
         {
-            _world.SetBlock(coords.X, coords.Y, coords.Z, BlockId.Water);
+            return;
         }
-        else if (level <= MaximumFluidDepletion)
+
+        if (_world.GetBlock(x, y, z) == block)
         {
-            _world.SetBlock(coords.X, coords.Y, coords.Z, (BlockId)((int)BlockId.WaterFlow1 + level - 1));
+            return;
         }
-        else
+
+        if (_world.SetBlock(x, y, z, block))
         {
-            _world.SetBlock(coords.X, coords.Y, coords.Z, BlockId.Air);
+            changes.Add(new BlockChange(x, y, z, block));
+            ActivateNeighbors(x, y, z);
         }
     }
 
-    private BlockId LevelToBlock(int level)
+    private static BlockId LevelToBlock(int level)
     {
         if (level <= 0)
         {
@@ -522,15 +654,11 @@ public sealed class BlockUpdateService : IDisposable
         return _world.GetBlock(coords.X, coords.Y, coords.Z);
     }
 
-    private bool InBounds(Coordinates3D coords)
-    {
-        return _world.InBounds(coords.X, coords.Y, coords.Z);
-    }
+    private bool InBounds(Coordinates3D coords) =>
+        _world.InBounds(coords.X, coords.Y, coords.Z);
 
-    private static bool IsPassable(BlockId block)
-    {
-        return block == BlockId.Air || BlockRegistry.IsPlant(block);
-    }
+    private static bool IsPassable(BlockId block) =>
+        block == BlockId.Air || BlockRegistry.IsPlant(block);
 
     private IEnumerable<Coordinates3D> Neighbors(Coordinates3D coords)
     {
@@ -540,17 +668,48 @@ public sealed class BlockUpdateService : IDisposable
         yield return coords + Coordinates3D.West;
     }
 
-    private void UpdatePlants(List<BlockChange> changes)
+    private void Activate(int x, int y, int z)
+    {
+        if (!_world.InBounds(x, y, z))
+        {
+            return;
+        }
+
+        lock (_activeSync)
+        {
+            if (_active.Count >= MaximumActiveCells)
+            {
+                return;
+            }
+
+            _active.Add((x, y, z));
+        }
+    }
+
+    private void ActivateNeighbors(int x, int y, int z)
+    {
+        Activate(x, y, z);
+
+        Activate(x + 1, y, z);
+        Activate(x - 1, y, z);
+        Activate(x, y + 1, z);
+        Activate(x, y - 1, z);
+        Activate(x, y, z + 1);
+        Activate(x, y, z - 1);
+    }
+
+    private void GrowPlants(List<BlockChange> changes)
     {
         lock (_worldSync)
         {
-            for (var x = 0; x < _world.SizeX; x++)
-            for (var y = 1; y < _world.SizeY - 1; y++)
-            for (var z = 0; z < _world.SizeZ; z++)
+            for (var sample = 0; sample < PlantGrowthSamples; sample++)
             {
+                var x = _random.Next(1, _world.SizeX - 1);
+                var z = _random.Next(1, _world.SizeZ - 1);
+                var y = _random.Next(1, _world.SizeY - 1);
                 var block = _world.GetBlock(x, y, z);
 
-                if (!BlockRegistry.IsPlant(block) || block == BlockId.Wheat7)
+                if (!BlockRegistry.IsCrop(block) || block == BlockId.Wheat7)
                 {
                     continue;
                 }
@@ -562,9 +721,7 @@ public sealed class BlockUpdateService : IDisposable
 
                 var below = _world.GetBlock(x, y - 1, z);
 
-                if (below != BlockId.Grass &&
-                    below != BlockId.Dirt &&
-                    below != BlockId.Sand)
+                if (below is not (BlockId.Grass or BlockId.Dirt or BlockId.Sand or BlockId.Farmland))
                 {
                     continue;
                 }
@@ -575,16 +732,7 @@ public sealed class BlockUpdateService : IDisposable
                 }
 
                 var next = BlockRegistry.NextPlantStage(block);
-
-                if (next == block)
-                {
-                    continue;
-                }
-
-                if (_world.SetBlock(x, y, z, next))
-                {
-                    changes.Add(new BlockChange(x, y, z, next));
-                }
+                SetBlock(changes, x, y, z, next);
             }
         }
     }
@@ -629,10 +777,10 @@ public sealed class BlockUpdateService : IDisposable
 
         public void Clamp(int value)
         {
+            X = Math.Sign(X) * Math.Min(Math.Abs(X), value);
+            Y = Math.Sign(Y) * Math.Min(Math.Abs(Y), value);
+            Z = Math.Sign(Z) * Math.Min(Math.Abs(Z), value);
         }
-
-        public int DistanceTo(Coordinates3D other) =>
-            Math.Abs(X - other.X) + Math.Abs(Y - other.Y) + Math.Abs(Z - other.Z);
 
         public static bool operator ==(Coordinates3D left, Coordinates3D right) =>
             left.X == right.X && left.Y == right.Y && left.Z == right.Z;
