@@ -53,8 +53,23 @@ public class Game1 : Game
     private const int InventoryColumns = 9;
     private const int InventoryCell = 48;
 
-    private static readonly Color SkyColor = new(135, 206, 235);
     private static readonly Color UnderwaterColor = new(22, 48, 104);
+
+    /// <summary>Current sky colour, driven by the day/night cycle.</summary>
+    private Color SkyColor
+    {
+        get
+        {
+            var hours = Math.Clamp(_timeOfDay, 0.0, 24.0);
+            var elevation = (float)Math.Sin((hours - 6.0) / 24.0 * Math.PI * 2.0);
+            var daylight = Math.Clamp(elevation, 0f, 1f);
+            return Color.Lerp(new Color(8, 12, 34, 255), new Color(135, 206, 235, 255), daylight);
+        }
+    }
+
+    private double _timeOfDay = 12.0;
+    private double _lastLightingHour = -1.0;
+    private double _lastSkyHour = -1.0;
 
     private static readonly Vector3[] TopCorners =
     {
@@ -143,6 +158,8 @@ public class Game1 : Game
     private BasicEffect _texturedEffect = null!;
     private BasicEffect _colorEffect = null!;
     private Texture2D _atlasTexture = null!;
+    private Texture2D _skyGradient = null!;
+    private Texture2D _celestialBody = null!;
     private CloudLayer _clouds = null!;
 
     private Vector3 _position = new(8f, 80f, 8f);
@@ -246,6 +263,38 @@ public class Game1 : Game
 
         _pixel = new Texture2D(GraphicsDevice, 1, 1);
         _pixel.SetData(new[] { Color.White });
+
+        // Vertical sky gradient and radial glow texture used by the day/night skybox.
+        _skyGradient = new Texture2D(GraphicsDevice, 256, 256, false, SurfaceFormat.Color);
+        var skyPixels = new Color[256 * 256];
+        for (var y = 0; y < 256; y++)
+        {
+            var t = (float)y / 255f;
+            var top = new Color((byte)8, (byte)12, (byte)34, (byte)255);
+            var horizon = new Color((byte)135, (byte)206, (byte)235, (byte)255);
+            for (var x = 0; x < 256; x++)
+            {
+                skyPixels[y * 256 + x] = Color.Lerp(top, horizon, t);
+            }
+        }
+
+        _skyGradient.SetData(skyPixels);
+
+        _celestialBody = new Texture2D(GraphicsDevice, 256, 256, false, SurfaceFormat.Color);
+        var celestialPixels = new Color[256 * 256];
+        for (var y = 0; y < 256; y++)
+        {
+            for (var x = 0; x < 256; x++)
+            {
+                var dx = x - 127.5f;
+                var dy = y - 127.5f;
+                var dist = MathF.Sqrt(dx * dx + dy * dy) / 128f;
+                celestialPixels[y * 256 + x] = new Color((byte)255, (byte)255, (byte)255, (byte)(MathF.Max(0f, 1f - dist) * 255));
+            }
+        }
+
+        _celestialBody.SetData(celestialPixels);
+
 
         _atlasTexture = BlockAtlas.CreateTexture(GraphicsDevice);
         _clouds = new CloudLayer(GraphicsDevice);
@@ -371,6 +420,12 @@ public class Game1 : Game
             UpdateLighting();
         }
 
+        if (_state == GameState.Playing && !_paused)
+        {
+            // One full day/night cycle per ten real minutes.
+            _timeOfDay += deltaTime / 600.0;
+        }
+
         if (_worldReady)
         {
             RebuildDirtyChunks(2);
@@ -464,6 +519,8 @@ public class Game1 : Game
         GraphicsDevice.Clear(fogColor);
         GraphicsDevice.SamplerStates[0] = SamplerState.PointClamp;
         GraphicsDevice.RasterizerState = RasterizerState.CullNone;
+
+        DrawDayNightSky(view, projection);
 
         _texturedEffect.View = view;
         _texturedEffect.Projection = projection;
@@ -597,6 +654,86 @@ public class Game1 : Game
 
         chunks.Sort((a, b) => b.Distance.CompareTo(a.Distance));
         return chunks.Select(entry => entry.Mesh).ToList();
+    }
+
+    /// <summary>
+    /// Day/night sky: a full-screen gradient quad plus a sun or moon disc that
+    /// follows the current time of day. Replaces the plain clear colour while
+    /// the world is being drawn.
+    /// </summary>
+    private void DrawDayNightSky(Matrix view, Matrix projection)
+    {
+        var viewport = GraphicsDevice.Viewport;
+        var width = viewport.Width;
+        var height = viewport.Height;
+
+        var hours = Math.Clamp(_timeOfDay, 0.0, 24.0);
+        var elevation = (float)Math.Sin((hours - 6.0) / 24.0 * Math.PI * 2.0);
+        var daylight = Math.Clamp(elevation, 0f, 1f);
+
+        if (Math.Floor(_timeOfDay) != _lastSkyHour)
+        {
+            RebuildSkyGradient((float)Math.Clamp(_timeOfDay % 24.0, 0.0, 24.0));
+            _lastSkyHour = (float)Math.Floor(_timeOfDay);
+        }
+
+        _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.LinearClamp, DepthStencilState.None, RasterizerState.CullNone);
+        _spriteBatch.Draw(_skyGradient, new Rectangle(0, 0, width, height), SkyColor);
+        _spriteBatch.End();
+
+        var angle = (float)((hours - 6.0) / 12.0 * Math.PI);
+        var sunDirection = new Vector3(
+            (float)Math.Cos(angle) * (float)Math.Cos(elevation),
+            (float)Math.Sin(elevation),
+            (float)Math.Sin(angle) * (float)Math.Cos(elevation));
+        var sunPosition = _position + new Vector3(0f, EyeHeight, 0f) + sunDirection * 160f;
+        var sunScreen = viewport.Project(sunPosition, view, projection, Matrix.Identity);
+
+        if (daylight > 0.05f)
+        {
+
+            var sunRadius = (int)Math.Clamp(Math.Min(width, height) / 22f, 10f, 64f);
+            _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.LinearClamp, DepthStencilState.None, RasterizerState.CullNone);
+            _spriteBatch.Draw(_celestialBody, new Rectangle(
+                (int)Math.Round(sunScreen.X - sunRadius / 2f),
+                (int)Math.Round(sunScreen.Y - sunRadius / 2f),
+                sunRadius,
+                sunRadius), Color.White);
+            _spriteBatch.End();
+        }
+        else
+        {
+            var moonDirection = -sunDirection;
+            var moonPosition = _position + new Vector3(0f, EyeHeight, 0f) + moonDirection * 160f;
+            var moonScreen = viewport.Project(moonPosition, view, projection, Matrix.Identity);
+
+            var moonRadius = (int)Math.Clamp(Math.Min(width, height) / 22f, 10f, 64f);
+            _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, SamplerState.LinearClamp, DepthStencilState.None, RasterizerState.CullNone);
+            _spriteBatch.Draw(_celestialBody, new Rectangle(
+                (int)Math.Round(moonScreen.X - moonRadius / 2f),
+                (int)Math.Round(moonScreen.Y - moonRadius / 2f),
+                moonRadius,
+                moonRadius), new Color(230, 230, 255));
+            _spriteBatch.End();
+        }
+    }
+
+    private void RebuildSkyGradient(float daylight)
+    {
+        var top = Color.Lerp(new Color(8, 12, 34, 255), new Color(135, 206, 235, 255), daylight);
+        var horizon = Color.Lerp(new Color(30, 34, 52, 255), new Color(255, 250, 230, 255), daylight);
+
+        var skyPixels = new Color[256 * 256];
+        for (var y = 0; y < 256; y++)
+        {
+            var t = (float)y / 255f;
+            for (var x = 0; x < 256; x++)
+            {
+                skyPixels[y * 256 + x] = Color.Lerp(top, horizon, t);
+            }
+        }
+
+        _skyGradient.SetData(skyPixels);
     }
 
     private void DrawWorldMesh(PrimitiveMesh<VertexPositionColorTexture> mesh)
@@ -1760,26 +1897,39 @@ public class Game1 : Game
     /// </summary>
     private void UpdateLighting()
     {
-        if (_worldReady)
-        {
-            return;
-        }
-
         var totalChunks = (_world.SizeX / ChunkSize) * (_world.SizeZ / ChunkSize);
 
-        // Wait for every chunk, but never hold the world hostage if the server
-        // is slow or a packet was lost.
-        if (_loadedChunks.Count < totalChunks && _networkTime - _worldStartTime < 5.0)
+        if (!_worldReady)
         {
+            // Wait for every chunk, but never hold the world hostage if the
+            // server is slow or a packet was lost.
+            if (_loadedChunks.Count < totalChunks && _networkTime - _worldStartTime < 5.0)
+            {
+                return;
+            }
+
+            _lighting.Initialize((float)_timeOfDay);
+            _worldReady = true;
+
+            foreach (var key in _loadedChunks)
+            {
+                _dirtyChunks.Add(key);
+            }
+
             return;
         }
 
-        _lighting.Initialize();
-        _worldReady = true;
-
-        foreach (var key in _loadedChunks)
+        // The day/night cycle changes sky light, so the world has to be relit.
+        // Recompute once per in-game hour so the frame loop stays cheap.
+        if (Math.Floor(_timeOfDay) != _lastLightingHour)
         {
-            _dirtyChunks.Add(key);
+            _lighting.Compute((float)_timeOfDay);
+            _lastLightingHour = Math.Floor(_timeOfDay);
+
+            foreach (var key in _loadedChunks)
+            {
+                _dirtyChunks.Add(key);
+            }
         }
     }
 

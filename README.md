@@ -83,6 +83,35 @@ so breaking or placing a block re-lights only a small local region. Faces are
 shaded with the light of the air cell in front of them, and unlit caves keep a
 small ambient floor so they stay readable.
 
+## Day and night
+
+A full day lasts ten real minutes. The current in-game hour drives the sky
+colour, fog, and sky light level: at dawn and dusk the light fades through
+orange and blue, at noon the surface is fully lit, and at night the sun is
+replaced by a moon while the sky light drops to zero (torches and lava still
+glow). The background is a vertical gradient, and the sun and moon are discs
+projected from a direction that rotates across the sky; the moon is always
+opposite the sun. World lighting is recomputed once per in-game hour, and only
+the affected chunk meshes are rebuilt.
+
+## Fluids
+
+The server runs block updates on a separate thread. Water behaves like a
+simplified Minecraft fluid: `Water` is an infinite source, flow spreads
+horizontally with decreasing strength (levels 1-7), columns fall and reset
+their level, and flow disappears when its source is removed. Lava uses the same
+simulation with its own flow stages; every lava stage emits light, so both
+still pools and moving lava brighten their surroundings (and relight instantly
+when lava flows or is removed). Wheat grows through seven stages when it has
+air above and dirt, grass, or sand below.
+
+The client renders opaque and transparent blocks in separate passes. Water is
+rendered as a translucent stepped mesh: side faces rise only to the flow level
+and the top is two triangles, matching Minecraft's water levels. Flowing lava
+uses cube geometry and its own light-emitting stages. Wheat uses crossed quads.
+Transparent blocks use alpha blending with depth writes disabled, and the
+crosshair raycast skips non-solid blocks such as water and crops.
+
 Remote players are blocky humanoids with a head, torso, two arms, and two legs,
 tinted with a deterministic color derived from the username. Positions and view
 angles are sent from the client to the server on a fixed 60 Hz network thread;
@@ -100,19 +129,6 @@ Names float above the heads. Labels are projected with the live viewport on
 every frame, drawn at whole-pixel positions with point sampling, and backed by
 a dark plate so they stay crisp and readable after a window resize. Your own
 username is shown in the HUD, so names are visible even in a solo session.
-
-The server runs block updates on a separate thread. Water behaves like a
-simplified Minecraft fluid: `Water` is an infinite source, flow spreads
-horizontally with decreasing strength (levels 1-7), columns fall and reset
-their level, and flow disappears when its source is removed. Wheat grows
-through seven stages when it has air above and dirt, grass, or sand below.
-
-The client renders opaque and transparent blocks in separate passes. Water is
-rendered as a translucent stepped mesh: side faces rise only to the flow
-level and the top is two triangles, matching Minecraft's water levels. Wheat
-uses crossed quads. Transparent blocks use alpha blending with depth writes
-disabled, and the crosshair raycast skips non-solid blocks such as water and
-crops.
 
 Pressing `Escape` pauses the game: the overlay appears, the mouse is released,
 and local movement, looking, block edits, and hotbar selection freeze. Server

@@ -81,6 +81,16 @@ public enum BlockId : ushort
     // Water that is falling but is not an infinite source.
     WaterFalling = 207,
 
+    // Flowing-lava stages, mirroring the water flow stages (source lava is
+    // BlockId.Lava itself; higher stages are weaker flow).
+    LavaFlow1 = 235,
+    LavaFlow2 = 236,
+    LavaFlow3 = 237,
+    LavaFlow4 = 238,
+    LavaFlow5 = 239,
+    LavaFlow6 = 240,
+    LavaFlow7 = 241,
+
     // Growable crop stages.
     Wheat1 = 210,
     Wheat2 = 211,

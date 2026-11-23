@@ -110,6 +110,23 @@ public static class BlockRegistry
         new(BlockId.WaterFalling, "Falling Water", 0x3F76E4, IsSolid: false, IsTransparent: true,
             Alpha: 0.72f, Shape: BlockShape.Water, Texture: BlockTexture.Water),
 
+        // Flowing-lava stages, mirroring the water flow stages (source lava is
+        // BlockId.Lava itself; higher stages are weaker flow).
+        new(BlockId.LavaFlow1, "Flowing Lava 1", 0xE27019, IsSolid: false, IsTransparent: false,
+            Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
+        new(BlockId.LavaFlow2, "Flowing Lava 2", 0xE27019, IsSolid: false, IsTransparent: false,
+            Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
+        new(BlockId.LavaFlow3, "Flowing Lava 3", 0xE27019, IsSolid: false, IsTransparent: false,
+            Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
+        new(BlockId.LavaFlow4, "Flowing Lava 4", 0xE27019, IsSolid: false, IsTransparent: false,
+            Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
+        new(BlockId.LavaFlow5, "Flowing Lava 5", 0xE27019, IsSolid: false, IsTransparent: false,
+            Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
+        new(BlockId.LavaFlow6, "Flowing Lava 6", 0xE27019, IsSolid: false, IsTransparent: false,
+            Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
+        new(BlockId.LavaFlow7, "Flowing Lava 7", 0xE27019, IsSolid: false, IsTransparent: false,
+            Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
+
         // Crop growth stages share one texture and change tint as they ripen.
         new(BlockId.Wheat1, "Wheat", 0x6FBF3F, IsSolid: false, IsTransparent: true,
             Shape: BlockShape.Cross, Texture: BlockTexture.Wheat, Tint: 0x7ACB45),
@@ -191,6 +208,13 @@ public static class BlockRegistry
         table[(int)BlockId.Glowstone] = 15;
         table[(int)BlockId.JackOLantern] = 15;
         table[(int)BlockId.Lava] = 15;
+        table[(int)BlockId.LavaFlow1] = 15;
+        table[(int)BlockId.LavaFlow2] = 15;
+        table[(int)BlockId.LavaFlow3] = 15;
+        table[(int)BlockId.LavaFlow4] = 15;
+        table[(int)BlockId.LavaFlow5] = 15;
+        table[(int)BlockId.LavaFlow6] = 15;
+        table[(int)BlockId.LavaFlow7] = 15;
         return table;
     }
 
@@ -217,6 +241,7 @@ public static class BlockRegistry
         .Where(block =>
             block.Id != BlockId.Air &&
             !IsWaterFlow(block.Id) &&
+            !IsLavaFlow(block.Id) &&
             block.Id != BlockId.Water &&
             block.Id != BlockId.WaterFalling &&
             block.Id != BlockId.Wheat2 &&
@@ -249,7 +274,11 @@ public static class BlockRegistry
     public static bool IsWaterFlow(BlockId id) =>
         id >= BlockId.WaterFlow1 && id <= BlockId.WaterFlow7;
 
-    public static bool IsLava(BlockId id) => id == BlockId.Lava;
+    public static bool IsLava(BlockId id) =>
+        id == BlockId.Lava || IsLavaFlow(id);
+
+    public static bool IsLavaFlow(BlockId id) =>
+        id >= BlockId.LavaFlow1 && id <= BlockId.LavaFlow7;
 
     public static bool IsFluid(BlockId id) => IsWater(id) || IsLava(id);
 
@@ -317,6 +346,47 @@ public static class BlockRegistry
 
         var clamped = Math.Min(level, 7);
         return (BlockId)((int)BlockId.WaterFlow1 + clamped - 1);
+    }
+
+    /// <summary>Resolves a flowing-lava level to its block id (source is Lava).</summary>
+    public static BlockId LavaBlockForLevel(int level)
+    {
+        if (level <= 0)
+        {
+            return BlockId.Lava;
+        }
+
+        var clamped = Math.Min(level, 7);
+        return (BlockId)((int)BlockId.LavaFlow1 + clamped - 1);
+    }
+
+    /// <summary>
+    /// Shared fluid level: water sources/falling are 0, flowing stages are
+    /// 1..7, and non-fluids report -1.
+    /// </summary>
+    public static int FluidLevel(BlockId id)
+    {
+        if (id == BlockId.Water || id == BlockId.WaterFalling)
+        {
+            return 0;
+        }
+
+        if (IsWaterFlow(id))
+        {
+            return (int)id - (int)BlockId.WaterFlow1 + 1;
+        }
+
+        if (id == BlockId.Lava)
+        {
+            return 0;
+        }
+
+        if (IsLavaFlow(id))
+        {
+            return (int)id - (int)BlockId.LavaFlow1 + 1;
+        }
+
+        return -1;
     }
 
     /// <summary>Advances a crop one stage; mature crops stay put.</summary>

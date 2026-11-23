@@ -205,7 +205,7 @@ public sealed class BlockUpdateService : IDisposable
 
         var block = _world.GetBlock(x, y, z);
 
-        if (BlockRegistry.IsWater(block))
+        if (BlockRegistry.IsFluid(block))
         {
             DoAutomata(changes, x, y, z);
             return;
@@ -305,23 +305,18 @@ public sealed class BlockUpdateService : IDisposable
 
         var current = _world.GetBlock(x, y, z);
 
-        if (!BlockRegistry.IsWater(current))
+        if (!BlockRegistry.IsFluid(current))
         {
             return;
         }
 
         var coords = new Coordinates3D(x, y, z);
-        var previousLevel = BlockRegistry.WaterLevel(current);
-
-        if (previousLevel < 0)
-        {
-            previousLevel = 0;
-        }
+        var previousLevel = Math.Max(BlockRegistry.FluidLevel(current), 0);
 
         var inward = DetermineInwardFlow(coords);
         var outward = DetermineOutwardFlow(coords, previousLevel);
 
-        // Flowing down takes priority for non-source water.
+        // Flowing down takes priority for non-source fluid.
         if (outward.Length == 1 &&
             outward[0].TargetBlock == coords + Coordinates3D.Down &&
             previousLevel != 0)
@@ -330,7 +325,7 @@ public sealed class BlockUpdateService : IDisposable
             return;
         }
 
-        // Inward flow (neighboring water levels feeding this cell).
+        // Inward flow (neighboring fluid levels feeding this cell).
         if (inward > MaximumFluidDepletion)
         {
             SetBlock(changes, x, y, z, BlockId.Air);
@@ -339,7 +334,14 @@ public sealed class BlockUpdateService : IDisposable
 
         if (inward != previousLevel)
         {
-            SetBlock(changes, x, y, z, LevelToBlock(inward));
+            SetBlock(
+                changes,
+                x,
+                y,
+                z,
+                BlockRegistry.IsLava(current)
+                    ? BlockRegistry.LavaBlockForLevel(inward)
+                    : BlockRegistry.WaterBlockForLevel(inward));
 
             if (inward == 0 && previousLevel != 0)
             {
@@ -358,16 +360,11 @@ public sealed class BlockUpdateService : IDisposable
 
     private byte DetermineInwardFlow(Coordinates3D coords)
     {
-        var currentLevel = BlockRegistry.WaterLevel(_world.GetBlock(coords.X, coords.Y, coords.Z));
-
-        if (currentLevel < 0)
-        {
-            currentLevel = 0;
-        }
+        var currentLevel = Math.Max(BlockRegistry.FluidLevel(_world.GetBlock(coords.X, coords.Y, coords.Z)), 0);
 
         var upBlock = GetBlock(coords + Coordinates3D.Up);
 
-        if (BlockRegistry.IsWater(upBlock))
+        if (BlockRegistry.IsFluid(upBlock))
         {
             return (byte)currentLevel;
         }
@@ -384,17 +381,12 @@ public sealed class BlockUpdateService : IDisposable
         {
             var neighborBlock = GetBlock(neighbor);
 
-            if (!BlockRegistry.IsWater(neighborBlock))
+            if (!BlockRegistry.IsFluid(neighborBlock))
             {
                 continue;
             }
 
-            var neighborLevel = BlockRegistry.WaterLevel(neighborBlock);
-
-            if (neighborLevel < 0)
-            {
-                neighborLevel = 0;
-            }
+            var neighborLevel = Math.Max(BlockRegistry.FluidLevel(neighborBlock), 0);
 
             if (neighborLevel < highestNeighboringFluid)
             {
@@ -424,11 +416,13 @@ public sealed class BlockUpdateService : IDisposable
     {
         var outwardFlow = new List<LiquidFlow>(5);
 
+        var water = !BlockRegistry.IsLava(_world.GetBlock(coords.X, coords.Y, coords.Z));
+
         var below = coords + Coordinates3D.Down;
 
-        if (InBounds(below) && IsPassable(GetBlock(below)) && !BlockRegistry.IsWater(GetBlock(below)))
+        if (InBounds(below) && IsPassable(GetBlock(below)) && !BlockRegistry.IsFluid(GetBlock(below)))
         {
-            outwardFlow.Add(new LiquidFlow(below, 1));
+            outwardFlow.Add(new LiquidFlow(below, 1, water));
 
             if (currentLevel != 0)
             {
@@ -465,7 +459,7 @@ public sealed class BlockUpdateService : IDisposable
 
                 var provider = GetBlock(target);
 
-                if (!IsPassable(provider) || BlockRegistry.IsWater(provider))
+                if (!IsPassable(provider) || BlockRegistry.IsFluid(provider))
                 {
                     continue;
                 }
@@ -512,34 +506,34 @@ public sealed class BlockUpdateService : IDisposable
             var xBlock = GetBlock(xCheck);
             var zBlock = GetBlock(zCheck);
 
-            if (IsPassable(xBlock) && !BlockRegistry.IsWater(xBlock))
+            if (IsPassable(xBlock) && !BlockRegistry.IsFluid(xBlock))
             {
                 if (!outwardFlow.Any(f => f.TargetBlock == xCheck))
                 {
-                    outwardFlow.Add(new LiquidFlow(xCheck, (byte)(currentLevel + 1)));
+                    outwardFlow.Add(new LiquidFlow(xCheck, (byte)(currentLevel + 1), water));
                 }
             }
 
-            if (IsPassable(zBlock) && !BlockRegistry.IsWater(zBlock))
+            if (IsPassable(zBlock) && !BlockRegistry.IsFluid(zBlock))
             {
                 if (!outwardFlow.Any(f => f.TargetBlock == zCheck))
                 {
-                    outwardFlow.Add(new LiquidFlow(zCheck, (byte)(currentLevel + 1)));
+                    outwardFlow.Add(new LiquidFlow(zCheck, (byte)(currentLevel + 1), water));
                 }
             }
         }
 
         // Occasionally the nearest candidate hole is not acceptable, but there
         // is space immediately next to the block.
-        if (outwardFlow.Count == 0 && !BlockRegistry.IsWater(GetBlock(below)))
+        if (outwardFlow.Count == 0 && !BlockRegistry.IsFluid(GetBlock(below)))
         {
             foreach (var neighbor in Neighbors(coords))
             {
                 var block = GetBlock(neighbor);
 
-                if (IsPassable(block) && !BlockRegistry.IsWater(block))
+                if (IsPassable(block) && !BlockRegistry.IsFluid(block))
                 {
-                    outwardFlow.Add(new LiquidFlow(neighbor, (byte)(currentLevel + 1)));
+                    outwardFlow.Add(new LiquidFlow(neighbor, (byte)(currentLevel + 1), water));
                 }
             }
         }
@@ -556,7 +550,7 @@ public sealed class BlockUpdateService : IDisposable
 
         var targetBlock = GetBlock(flow.TargetBlock);
 
-        if (BlockRegistry.IsWater(targetBlock))
+        if (BlockRegistry.IsFluid(targetBlock))
         {
             return;
         }
@@ -567,7 +561,9 @@ public sealed class BlockUpdateService : IDisposable
         }
 
         var level = Math.Min((int)flow.Level, MaximumFluidDepletion);
-        var block = LevelToBlock(level);
+        var block = flow.Water
+            ? BlockRegistry.WaterBlockForLevel(level)
+            : BlockRegistry.LavaBlockForLevel(level);
 
         SetBlock(
             changes,
@@ -739,14 +735,16 @@ public sealed class BlockUpdateService : IDisposable
 
     private struct LiquidFlow
     {
-        public LiquidFlow(Coordinates3D targetBlock, byte level)
+        public LiquidFlow(Coordinates3D targetBlock, byte level, bool water)
         {
             TargetBlock = targetBlock;
             Level = level;
+            Water = water;
         }
 
         public Coordinates3D TargetBlock;
         public byte Level;
+        public bool Water;
     }
 
     private struct Coordinates3D

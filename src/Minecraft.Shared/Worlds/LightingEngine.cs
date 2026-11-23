@@ -27,6 +27,7 @@ public sealed class LightingEngine
     private readonly Queue<LightNode> _addQueue = new();
     private readonly Queue<LightNode> _removeQueue = new();
     private readonly HashSet<(int X, int Z)> _changedChunks = new();
+    private float _currentTimeOfDay;
 
     private struct LightNode
     {
@@ -43,16 +44,20 @@ public sealed class LightingEngine
 
     public void ClearChangedChunks() => _changedChunks.Clear();
 
-    /// <summary>Recomputes every light source in the world.</summary>
-    public void Initialize()
+    /// <summary>Recomputes every light source in the world at a given time of day.</summary>
+    public void Initialize(float timeOfDay)
     {
         _world.ClearLight();
         _changedChunks.Clear();
         _addQueue.Clear();
         _removeQueue.Clear();
+        _currentTimeOfDay = timeOfDay;
 
         // Sky light: flood each column from the top down until the first opaque
-        // block. The surface block itself is lit so its top face is bright.
+        // block. The surface block itself is lit so its top face is bright. The
+        // sky contribution fades into night.
+        var skyLevel = SkyLightForTime(timeOfDay);
+
         for (var x = 0; x < _world.SizeX; x++)
         {
             for (var z = 0; z < _world.SizeZ; z++)
@@ -63,12 +68,19 @@ public sealed class LightingEngine
                 {
                     if (BlockRegistry.IsOpaque(_world.GetBlock(x, y, z)))
                     {
-                        _world.SetSkyLight(x, y, z, MaxLight);
+                        if (skyLevel > 0)
+                        {
+                            _world.SetSkyLight(x, y, z, skyLevel);
+                        }
+
                         open = false;
                         continue;
                     }
 
-                    _world.SetSkyLight(x, y, z, MaxLight);
+                    if (skyLevel > 0)
+                    {
+                        _world.SetSkyLight(x, y, z, skyLevel);
+                    }
                 }
             }
         }
@@ -93,7 +105,7 @@ public sealed class LightingEngine
             }
         }
 
-        Propagate(true);
+        Propagate(true, skyLevel);
 
         // Block light sources.
         for (var x = 0; x < _world.SizeX; x++)
@@ -115,7 +127,24 @@ public sealed class LightingEngine
             }
         }
 
-        Propagate(false);
+        Propagate(false, 15);
+    }
+
+    /// <summary>
+    /// Sky light level for a time of day. One full day is twelve in-game hours
+    /// long, which drives the day/night cycle and the sun/moon skybox.
+    /// </summary>
+    private static byte SkyLightForTime(float timeOfDay)
+    {
+        var hours = Math.Clamp(timeOfDay, 0f, 24f);
+        var elevation = (float)Math.Sin((hours - 6f) / 24f * Math.PI * 2f);
+        return (byte)(MaxLight * Math.Clamp(elevation, 0f, 1f));
+    }
+
+    /// <summary>Recomputes every light source in the world at a given time of day.</summary>
+    public void Compute(float timeOfDay)
+    {
+        Initialize(timeOfDay);
     }
 
     /// <summary>Updates the light affected by a single block edit.</summary>
@@ -139,14 +168,14 @@ public sealed class LightingEngine
         }
         else if (y == _world.SizeY - 1)
         {
-            SetSource(true, x, y, z, MaxLight);
+            SetSource(true, x, y, z, SkyLightForTime(_currentTimeOfDay));
         }
         else
         {
             SeedNeighbours(true, x, y, z);
         }
 
-        Propagate(true);
+        Propagate(true, SkyLightForTime(_currentTimeOfDay));
 
         // Block light: drop the old emitter and any light trapped inside a
         // newly opaque block, then let the neighbours refill the cell.
@@ -165,7 +194,7 @@ public sealed class LightingEngine
             SeedNeighbours(false, x, y, z);
         }
 
-        Propagate(false);
+        Propagate(false, 15);
     }
 
     private void RemoveLight(bool sky, int x, int y, int z)
@@ -262,7 +291,7 @@ public sealed class LightingEngine
         _addQueue.Enqueue(new LightNode { X = x, Y = y, Z = z, Level = level });
     }
 
-    private void Propagate(bool sky)
+    private void Propagate(bool sky, byte skyLevel)
     {
         while (_addQueue.Count > 0)
         {
@@ -287,8 +316,8 @@ public sealed class LightingEngine
 
                 // Sky light travels straight down through open air without
                 // losing a level; every other step dims it by one.
-                var level = sky && dy == -1 && node.Level == MaxLight
-                    ? MaxLight
+                var level = sky && dy == -1 && node.Level == skyLevel
+                    ? skyLevel
                     : (byte)(node.Level - 1);
 
                 if (level <= GetLight(sky, nx, ny, nz))
