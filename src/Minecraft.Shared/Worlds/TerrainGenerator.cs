@@ -133,11 +133,9 @@ public static class TerrainGenerator
 
                     if (biome == BiomeId.Snowy)
                     {
-                        if (world.GetBlock(x, surfaceY + 1, z) == BlockId.Air)
-                        {
-                            world.SetBlock(x, surfaceY + 1, z, BlockId.SnowLayer);
-                        }
-
+                        // Thin snow layers look like floating sheets next to
+                        // full snow blocks, so snowy terrain uses solid blocks.
+                        world.SetBlock(x, surfaceY, z, BlockId.SnowBlock);
                         continue;
                     }
 

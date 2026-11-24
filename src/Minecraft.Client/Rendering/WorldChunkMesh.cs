@@ -158,7 +158,7 @@ public static class WorldMeshBuilder
                             break;
 
                         case BlockShape.SnowLayer:
-                            AddSnowLayer(target, new Vector3(x, y, z), definition, light);
+                            AddSnowLayer(target, world, x, y, z, definition, light);
                             break;
 
                         default:
@@ -339,22 +339,37 @@ public static class WorldMeshBuilder
 
     private static void AddSnowLayer(
         MeshData data,
-        Vector3 origin,
+        World world,
+        int x,
+        int y,
+        int z,
         BlockDefinition definition,
         byte light)
     {
+        var origin = new Vector3(x, y, z);
         var uv = BlockAtlas.GetUvRect(definition.Texture);
-        var color = Tint(definition, 1f, light);
+        var block = definition.Id;
 
-        var top = new[]
+        // A snow layer is a thin slab in its own cell. Cull faces shared with
+        // neighbouring snow or solid blocks: otherwise adjacent layers draw
+        // the same coplanar quads twice and z-fight.
+        var above = world.InBounds(x, y + 1, z)
+            ? world.GetBlock(x, y + 1, z)
+            : BlockId.Air;
+
+        if (above != block && !BlockRegistry.IsOpaque(above))
         {
-            new Vector3(0f, 0.125f, 0f),
-            new Vector3(0f, 0.125f, 1f),
-            new Vector3(1f, 0.125f, 1f),
-            new Vector3(1f, 0.125f, 0f),
-        };
+            var top = new[]
+            {
+                new Vector3(0f, 0.125f, 0f),
+                new Vector3(0f, 0.125f, 1f),
+                new Vector3(1f, 0.125f, 1f),
+                new Vector3(1f, 0.125f, 0f),
+            };
 
-        AddFace(data, origin, top, uv, HorizontalUvs, color);
+            AddFace(data, origin, top, uv, HorizontalUvs,
+                Tint(definition, 1f, world.GetLight(x, y + 1, z)));
+        }
 
         var north = new[]
         {
@@ -388,10 +403,29 @@ public static class WorldMeshBuilder
             new Vector3(1f, 0f, 1f),
         };
 
-        AddFace(data, origin, north, uv, SideUvs, Tint(definition, 0.72f, light));
-        AddFace(data, origin, south, uv, SideUvs, Tint(definition, 0.80f, light));
-        AddFace(data, origin, west, uv, SideUvs, Tint(definition, 0.68f, light));
-        AddFace(data, origin, east, uv, SideUvs, Tint(definition, 0.76f, light));
+        if (FaceVisible(world, block, x, y, z, 0, 0, -1))
+        {
+            AddFace(data, origin, north, uv, SideUvs,
+                Tint(definition, 0.72f, world.GetLight(x, y, z - 1)));
+        }
+
+        if (FaceVisible(world, block, x, y, z, 0, 0, 1))
+        {
+            AddFace(data, origin, south, uv, SideUvs,
+                Tint(definition, 0.80f, world.GetLight(x, y, z + 1)));
+        }
+
+        if (FaceVisible(world, block, x, y, z, -1, 0, 0))
+        {
+            AddFace(data, origin, west, uv, SideUvs,
+                Tint(definition, 0.68f, world.GetLight(x - 1, y, z)));
+        }
+
+        if (FaceVisible(world, block, x, y, z, 1, 0, 0))
+        {
+            AddFace(data, origin, east, uv, SideUvs,
+                Tint(definition, 0.76f, world.GetLight(x + 1, y, z)));
+        }
     }
 
     private static void AddBox(
