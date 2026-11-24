@@ -60,8 +60,11 @@ public class Game1 : Game
     {
         get
         {
-            var daylight = Daylight.Level((float)Math.Clamp(_timeOfDay, 0.0, 24.0));
-            return Color.Lerp(new Color(8, 12, 34, 255), new Color(135, 206, 235, 255), daylight);
+            var hours = (float)Math.Clamp(_timeOfDay, 0.0, 24.0);
+            var daylight = Daylight.Level(hours);
+            var sunset = Daylight.SunsetStrength(hours);
+            var baseColor = Color.Lerp(new Color(8, 12, 34, 255), new Color(135, 206, 235, 255), daylight);
+            return Color.Lerp(baseColor, new Color(238, 126, 74, 255), sunset * 0.55f);
         }
     }
 
@@ -70,12 +73,14 @@ public class Game1 : Game
         _timeOfDay = Math.Clamp(hours, 0.0, 24.0);
         _lastLightingHour = -1.0;
         _lastSkyHour = -1.0;
+        _lastSunset = -1f;
         ShowToast($"Time: {_timeOfDay:0.0}:00");
     }
 
     private double _timeOfDay = 12.0;
     private double _lastLightingHour = -1.0;
     private double _lastSkyHour = -1.0;
+    private float _lastSunset = -1f;
 
     private static readonly Vector3[] TopCorners =
     {
@@ -681,11 +686,13 @@ public class Game1 : Game
         var sunAngle = (hours - 6.0) / 24.0 * Math.PI * 2.0;
         var elevation = Daylight.SunElevation((float)hours);
         var daylight = Daylight.Level((float)hours);
+        var sunset = Daylight.SunsetStrength((float)hours);
 
-        if (Math.Floor(_timeOfDay) != _lastSkyHour)
+        if (Math.Floor(_timeOfDay) != _lastSkyHour || Math.Abs(sunset - _lastSunset) > 0.02f)
         {
-            RebuildSkyGradient(daylight);
+            RebuildSkyGradient(daylight, sunset);
             _lastSkyHour = Math.Floor(_timeOfDay);
+            _lastSunset = sunset;
         }
 
         // The gradient already contains the night/day colours, so draw it unmodified.
@@ -705,7 +712,9 @@ public class Game1 : Game
         var bodyDirection = isDay
             ? sunDirection
             : Vector3.Normalize(new Vector3(-sunDirection.X, -sunDirection.Y * 0.6f, -0.9f));
-        var bodyTint = isDay ? new Color(255, 245, 205) : new Color(225, 230, 255);
+        var bodyTint = isDay
+            ? Color.Lerp(new Color(255, 245, 205), new Color(255, 150, 80), sunset)
+            : new Color(225, 230, 255);
 
         // Do not draw a body that is behind the camera: perspective projection
         // of a point behind the near plane lands at mirrored screen coordinates.
@@ -738,18 +747,33 @@ public class Game1 : Game
         _spriteBatch.End();
     }
 
-    private void RebuildSkyGradient(float daylight)
+    private void RebuildSkyGradient(float daylight, float sunset)
     {
         var top = Color.Lerp(new Color(8, 12, 34, 255), new Color(135, 206, 235, 255), daylight);
         var horizon = Color.Lerp(new Color(30, 34, 52, 255), new Color(255, 250, 230, 255), daylight);
+
+        // Dawn and dusk wash the upper sky violet and the horizon warm orange.
+        var sunsetTop = new Color(72, 48, 96, 255);
+        var sunsetHorizon = new Color(255, 138, 72, 255);
+        top = Color.Lerp(top, sunsetTop, sunset * 0.45f);
+        horizon = Color.Lerp(horizon, sunsetHorizon, sunset * 0.9f);
 
         var skyPixels = new Color[256 * 256];
         for (var y = 0; y < 256; y++)
         {
             var t = (float)y / 255f;
+            var color = Color.Lerp(top, horizon, t);
+
+            if (sunset > 0f)
+            {
+                // A soft warm band just above the horizon, like low sun glow.
+                var band = MathF.Exp(-MathF.Pow((t - 0.82f) / 0.22f, 2f)) * sunset;
+                color = Color.Lerp(color, new Color(255, 178, 112, 255), band * 0.45f);
+            }
+
             for (var x = 0; x < 256; x++)
             {
-                skyPixels[y * 256 + x] = Color.Lerp(top, horizon, t);
+                skyPixels[y * 256 + x] = color;
             }
         }
 

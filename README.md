@@ -86,10 +86,10 @@ small ambient floor so they stay readable.
 ## Day and night
 
 A full day lasts ten real minutes. The current in-game hour drives the sky
-colour, fog, and sky light level: at dawn and dusk the light fades through
-orange and blue, at noon the surface is fully lit, and at night the sun is
-replaced by a moon while the sky light drops to zero (torches and lava still
-glow). The background is a vertical gradient, and the sun and moon are discs
+colour, fog, and sky light level: at dawn and dusk the horizon washes warm
+orange and the upper sky turns violet, at noon the surface is fully lit, and
+at night the sun is replaced by a moon while the sky light drops to zero
+(torches and lava still glow). The background is a vertical gradient, and the sun and moon are discs
 projected from a direction that rotates across the sky; the moon is always
 opposite the sun. The server owns the clock: use `time` in the server console
 to see the hour, or `time set <0-24>`, `time day`, `time night`, `time dawn`,

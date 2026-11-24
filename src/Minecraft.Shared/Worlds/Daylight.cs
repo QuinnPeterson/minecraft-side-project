@@ -16,4 +16,11 @@ public static class Daylight
     /// </summary>
     public static float Level(float hours) =>
         Math.Clamp((SunElevation(hours) + 0.05f) * 2.2f, 0f, 1f);
+
+    /// <summary>
+    /// Strength of the warm dawn/dusk glow (0..1), peaking when the sun is at
+    /// the horizon and fading out as it climbs or dips below it.
+    /// </summary>
+    public static float SunsetStrength(float hours) =>
+        Math.Clamp(1f - Math.Abs(SunElevation(hours)) / 0.45f, 0f, 1f);
 }
