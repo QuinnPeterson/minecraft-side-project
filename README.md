@@ -81,7 +81,11 @@ and block light (torches, glowstone, jack-o-lanterns, lava). It runs a full pass
 when the world arrives and then updates incrementally around every block edit,
 so breaking or placing a block re-lights only a small local region. Faces are
 shaded with the light of the air cell in front of them, and unlit caves keep a
-small ambient floor so they stay readable.
+small ambient floor so they stay readable. Leaves filter daylight, so canopies
+cast real shadows on the ground, and the outermost columns of the world are
+dimmer so tunnels dug into the edge fall dark. Sky light follows a shaft all
+the way down to bedrock. The mesher skips faces on the outside of the world
+shell; fog starts far enough out that block textures stay crisp.
 
 ## Day and night
 
@@ -175,13 +179,16 @@ Breaking consumes hardness: each successful hit subtracts the block's
 `EntityType` covers item drops, pigs, cows, and sheep. The server keeps an
 authoritative entity list, ticks it on a 20 Hz loop, and broadcasts
 `EntitySpawn` / `EntityUpdate` / `EntityRemove` snapshots. Clients render the
-multi-box solid models with the color effect and interpolate position + yaw/pitch.
+multi-box solid models with per-vertex lighting from the block the mob stands
+in, so animals dim at night and in caves, and interpolate position + yaw.
 
 Mobs spawn near the player (eight initial animals near spawn plus a new
-spawner every few seconds while they are needed, capped at twenty). They look
-around with their head before moving, wander a short distance at a calm speed,
-swim through water using buoyancy, flash red when hit, and die with a drop that
-the client picks up into the survival inventory.
+spawner every few seconds while they are needed, capped at twenty). The old
+timer-driven wander/look/swim AI was removed because it made animals jitter;
+mobs now simply fall and settle. They still flash red when hit and die with a
+drop that the client picks up into the survival inventory. Mobs are solid: the
+server pushes them out of player collision boxes and keeps them from stacking,
+and the client blocks player movement against them (item drops remain pickups).
 
 ## Networking
 

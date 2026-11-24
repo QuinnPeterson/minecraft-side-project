@@ -28,21 +28,15 @@ internal sealed class NetworkServer
         public float X, Y, Z;
         public float Vx, Vy, Vz;
         public float Yaw;
-        public float HeadYaw;
         public int Health = 10;
         public float HurtTimer;
         public int Data;
-        public float WanderTimer;
-        public float LookTimer;
-        public Random Rng = new();
 
         public ServerEntity(int id, Minecraft.Shared.Entities.EntityType type, float x, float y, float z, int data)
         {
             Id = id; Type = type; X = x; Y = y; Z = z; Data = data;
-            WanderTimer = (float)(new Random().NextDouble() * 2 + 1);
-            LookTimer = (float)(new Random().NextDouble() * 2 + 1);
-            Yaw = (float)(new Random().NextDouble() * Math.PI * 2);
-            HeadYaw = Yaw;
+            Vx = 0; Vy = 0; Vz = 0;
+            Yaw = 0;
         }
     }
 
@@ -617,67 +611,22 @@ internal sealed class NetworkServer
         {
             if (e.HurtTimer > 0) e.HurtTimer -= dt;
 
-            int bx = (int)MathF.Floor(e.X);
-            int by = (int)MathF.Floor(e.Y);
-            int bz = (int)MathF.Floor(e.Z);
-            bool inWater = false;
-            if (bx >= 0 && bx < _world.SizeX && by >= 0 && by < _world.SizeY && bz >= 0 && bz < _world.SizeZ)
-            {
-                BlockId block;
-                lock (_worldSync) { block = _world.GetBlock(bx, by, bz); }
-                inWater = BlockRegistry.IsWater(block);
-            }
-
-            e.LookTimer -= dt;
-            if (e.LookTimer <= 0)
-            {
-                e.LookTimer = 1f + (float)(e.Rng.NextDouble() * 2);
-                e.HeadYaw = e.Yaw + (float)(e.Rng.NextDouble() * 1.2 - 0.6);
-            }
-            e.HeadYaw += (e.Yaw - e.HeadYaw) * 0.05f;
-
-            if (e.Type == Minecraft.Shared.Entities.EntityType.Pig || e.Type == Minecraft.Shared.Entities.EntityType.Sheep || e.Type == Minecraft.Shared.Entities.EntityType.Cow)
-            {
-                e.WanderTimer -= dt;
-                if (e.WanderTimer <= 0)
-                {
-                    e.WanderTimer = 2f + (float)(e.Rng.NextDouble() * 3);
-                    if (e.Rng.NextDouble() < 0.5)
-                    {
-                        var speed = inWater ? 0.8f : 1.2f;
-                        var angle = (float)(e.Rng.NextDouble() * Math.PI * 2);
-                        e.Vx = MathF.Cos(angle) * speed;
-                        e.Vz = MathF.Sin(angle) * speed;
-                        e.Yaw = angle;
-                    }
-                    else
-                    {
-                        e.Vx = 0;
-                        e.Vz = 0;
-                    }
-                }
-            }
-            else
+            // The previous look-before-move / wander / swim AI made mobs jitter,
+            // so entities now just fall and settle (items keep their drop drift).
+            if (e.Type == Minecraft.Shared.Entities.EntityType.Item)
             {
                 e.Vx *= 0.9f;
                 e.Vz *= 0.9f;
             }
 
-            if (inWater)
-            {
-                e.Vy += 0.5f * dt;
-                if (e.Vy > 1f) e.Vy = 1f;
-                e.Vy *= 0.9f;
-            }
-            else
-            {
-                e.Vy -= gravity * dt;
-                if (e.Vy < -20f) e.Vy = -20f;
-            }
+            e.Vy -= gravity * dt;
+            if (e.Vy < -20f) e.Vy = -20f;
 
             e.X += e.Vx * dt;
             e.Y += e.Vy * dt;
             e.Z += e.Vz * dt;
+
+            ResolvePlayerCollisions(e);
 
             int gbx = (int)MathF.Floor(e.X);
             int gby = (int)MathF.Floor(e.Y - 0.5f);
@@ -717,7 +666,7 @@ internal sealed class NetworkServer
                 continue;
             }
 
-            Broadcast(WorldProtocol.CreateEntityUpdate(_netServer, DefaultGroupId, e.Id, e.X, e.Y, e.Z, e.HeadYaw));
+            Broadcast(WorldProtocol.CreateEntityUpdate(_netServer, DefaultGroupId, e.Id, e.X, e.Y, e.Z, e.Yaw));
 
             if (e.Type == Minecraft.Shared.Entities.EntityType.Item)
             {
@@ -746,11 +695,96 @@ internal sealed class NetworkServer
             }
         }
 
+        // Keep mobs from stacking on top of one another.
+        lock (_entitiesSync)
+        {
+            for (var i = 0; i < snapshot.Count; i++)
+            {
+                for (var j = i + 1; j < snapshot.Count; j++)
+                {
+                    var a = snapshot[i];
+                    var b = snapshot[j];
+
+                    if (a.Type == Minecraft.Shared.Entities.EntityType.Item ||
+                        b.Type == Minecraft.Shared.Entities.EntityType.Item)
+                    {
+                        continue;
+                    }
+
+                    var dx = a.X - b.X;
+                    var dz = a.Z - b.Z;
+                    var distanceSquared = dx * dx + dz * dz;
+
+                    if (distanceSquared >= 0.64f || distanceSquared < 0.000001f)
+                    {
+                        continue;
+                    }
+
+                    var distance = MathF.Sqrt(distanceSquared);
+                    var push = (0.8f - distance) * 0.5f;
+                    var nx = dx / distance;
+                    var nz = dz / distance;
+
+                    a.X += nx * push;
+                    a.Z += nz * push;
+                    b.X -= nx * push;
+                    b.Z -= nz * push;
+                }
+            }
+        }
+
         if (toRemove.Count > 0)
         {
             lock (_entitiesSync)
             {
                 _entities.RemoveAll(x => toRemove.Contains(x.Id));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pushes entities out of player collision boxes. Player movement is
+    /// client-authoritative; Game1 resolves entities on the client as well.
+    /// </summary>
+    private void ResolvePlayerCollisions(ServerEntity entity)
+    {
+        const float entityHalf = 0.4f;
+        const float playerHalf = 0.3f;
+        const float entityHeight = 1f;
+        const float playerHeight = 1.8f;
+
+        lock (_playersSync)
+        {
+            foreach (var player in _players)
+            {
+                var pos = player.Player.Position;
+
+                if (entity.Y + entityHeight <= pos.YPosition ||
+                    entity.Y >= pos.YPosition + playerHeight)
+                {
+                    continue;
+                }
+
+                var dx = entity.X - pos.XPosition;
+                var dz = entity.Z - pos.ZPosition;
+                var overlapX = entityHalf + playerHalf - MathF.Abs(dx);
+                var overlapZ = entityHalf + playerHalf - MathF.Abs(dz);
+
+                if (overlapX <= 0f || overlapZ <= 0f)
+                {
+                    continue;
+                }
+
+                if (overlapX < overlapZ)
+                {
+                    entity.X += (dx >= 0f ? 1f : -1f) * overlapX;
+                    entity.Vx = 0f;
+                }
+                else
+                {
+                    entity.Z += (dz >= 0f ? 1f : -1f) * overlapZ;
+                    entity.Vz = 0f;
+                }
             }
         }
     }

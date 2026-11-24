@@ -62,24 +62,32 @@ public sealed class LightingEngine
         {
             for (var z = 0; z < _world.SizeZ; z++)
             {
+                var columnSky = SkyLightForColumn(x, z);
+                var attenuation = 0;
                 var open = true;
 
                 for (var y = _world.SizeY - 1; y >= 0 && open; y--)
                 {
-                    if (BlockRegistry.IsOpaque(_world.GetBlock(x, y, z)))
+                    var block = _world.GetBlock(x, y, z);
+
+                    if (BlockRegistry.IsOpaque(block))
                     {
-                        if (skyLevel > 0)
+                        if (columnSky > 0)
                         {
-                            _world.SetSkyLight(x, y, z, skyLevel);
+                            _world.SetSkyLight(x, y, z, (byte)Math.Max(0, columnSky - attenuation));
                         }
 
                         open = false;
                         continue;
                     }
 
-                    if (skyLevel > 0)
+                    // Leaves filter daylight, so the ground under a canopy is
+                    // dimmer than the surrounding surface.
+                    attenuation += BlockRegistry.SkyAttenuation(block);
+
+                    if (columnSky > 0)
                     {
-                        _world.SetSkyLight(x, y, z, skyLevel);
+                        _world.SetSkyLight(x, y, z, (byte)Math.Max(0, columnSky - attenuation));
                     }
                 }
             }
@@ -140,6 +148,27 @@ public sealed class LightingEngine
         return (byte)(MaxLight * Daylight.Level(hours));
     }
 
+    /// <summary>
+    /// Sky light available in a column. The outermost columns are dimmer: the
+    /// open edge of the world is not lit by surrounding terrain, so caves and
+    /// tunnels dug into the side are properly dark.
+    /// </summary>
+    private byte SkyLightForColumn(int x, int z)
+    {
+        var sky = SkyLightForTime(_currentTimeOfDay);
+
+        if (sky == 0)
+        {
+            return 0;
+        }
+
+        var edge = Math.Min(
+            Math.Min(x, _world.SizeX - 1 - x),
+            Math.Min(z, _world.SizeZ - 1 - z));
+        var reduction = edge == 0 ? 3 : edge == 1 ? 1 : 0;
+        return (byte)Math.Max(0, sky - reduction);
+    }
+
     /// <summary>Recomputes every light source in the world at a given time of day.</summary>
     public void Compute(float timeOfDay)
     {
@@ -157,21 +186,31 @@ public sealed class LightingEngine
         var newOpaque = BlockRegistry.IsOpaque(newBlock);
         var emission = BlockRegistry.LightEmission(newBlock);
         var oldEmission = BlockRegistry.LightEmission(oldBlock);
+        var newAttenuation = BlockRegistry.SkyAttenuation(newBlock);
+        var oldAttenuation = BlockRegistry.SkyAttenuation(oldBlock);
+        var columnSky = SkyLightForColumn(x, z);
 
-        // Sky light only depends on opacity. Removing it from a cell that is
-        // still transparent would needlessly darken the column below, so it is
-        // only dropped when the new block actually blocks the sky.
-        if (newOpaque)
+        // Sky light only depends on opacity and filtering. Removing it from a
+        // cell that stays transparent would needlessly darken the column below,
+        // so only drop it when the block actually blocks or filters more sky.
+        if (newOpaque || oldAttenuation != newAttenuation)
         {
             RemoveLight(true, x, y, z);
         }
-        else if (y == _world.SizeY - 1)
+
+        if (!newOpaque)
         {
-            SetSource(true, x, y, z, SkyLightForTime(_currentTimeOfDay));
-        }
-        else
-        {
-            SeedNeighbours(true, x, y, z);
+            if (y == _world.SizeY - 1 ||
+                (y > 0 && _world.GetSkyLight(x, y - 1, z) == columnSky))
+            {
+                // The cell above is fully sky-lit, so this cell continues the
+                // shaft all the way down to bedrock without losing intensity.
+                SetSource(true, x, y, z, columnSky);
+            }
+            else
+            {
+                SeedNeighbours(true, x, y, z);
+            }
         }
 
         Propagate(true, SkyLightForTime(_currentTimeOfDay));
@@ -236,7 +275,8 @@ public sealed class LightingEngine
                 // A cell carries our light when it is dimmer than us, or when
                 // it is the open-air cell underneath a full sky-light column.
                 var child = neighbour < node.Level ||
-                            (sky && dy == -1 && neighbour == node.Level);
+                            (sky && dy == -1 && neighbour == node.Level &&
+                             node.Level == SkyLightForColumn(nx, nz));
 
                 if (child)
                 {
@@ -313,11 +353,12 @@ public sealed class LightingEngine
                     continue;
                 }
 
-                // Sky light travels straight down through open air without
-                // losing a level; every other step dims it by one.
-                var level = sky && dy == -1 && node.Level == skyLevel
-                    ? skyLevel
-                    : (byte)(node.Level - 1);
+                // Sky light travels straight down an open column without losing
+                // a level; leaves filter it, and every other step dims by one.
+                var attenuation = sky ? BlockRegistry.SkyAttenuation(_world.GetBlock(nx, ny, nz)) : (byte)0;
+                var level = sky && dy == -1 && attenuation == 0 && node.Level == SkyLightForColumn(nx, nz)
+                    ? node.Level
+                    : (byte)Math.Max(0, node.Level - Math.Max((byte)1, attenuation));
 
                 if (level <= GetLight(sky, nx, ny, nz))
                 {

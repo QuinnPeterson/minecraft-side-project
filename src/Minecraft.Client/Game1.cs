@@ -322,8 +322,8 @@ public class Game1 : Game
             LightingEnabled = false,
             FogEnabled = true,
             FogColor = SkyColor.ToVector3(),
-            FogStart = 42f,
-            FogEnd = 118f,
+            FogStart = 90f,
+            FogEnd = 200f,
         };
 
         _colorEffect = new BasicEffect(GraphicsDevice)
@@ -541,8 +541,8 @@ public class Game1 : Game
         _texturedEffect.Projection = projection;
         _texturedEffect.World = Matrix.Identity;
         _texturedEffect.FogColor = fogColor.ToVector3();
-        _texturedEffect.FogStart = underwater ? 1f : 42f;
-        _texturedEffect.FogEnd = underwater ? 20f : 118f;
+        _texturedEffect.FogStart = underwater ? 1f : 90f;
+        _texturedEffect.FogEnd = underwater ? 20f : 200f;
 
         _colorEffect.View = view;
         _colorEffect.Projection = projection;
@@ -1035,6 +1035,40 @@ public class Game1 : Game
         }
     }
 
+    /// <summary>Mobs are solid to the player; item drops are pickups instead.</summary>
+    private bool CollidesEntity(Vector3 feet)
+    {
+        const float playerHalf = PlayerWidth * 0.5f;
+        const float entityHalf = 0.4f;
+        const float entityHeight = 1f;
+
+        foreach (var e in _entities)
+        {
+            if (e.Type == EntityType.Item)
+            {
+                continue;
+            }
+
+            var ex = e.Position.X;
+            var ey = e.Position.Y;
+            var ez = e.Position.Z;
+
+            if (feet.X + playerHalf <= ex - entityHalf ||
+                feet.X - playerHalf >= ex + entityHalf ||
+                feet.Y + PlayerHeight <= ey ||
+                feet.Y >= ey + entityHeight ||
+                feet.Z + playerHalf <= ez - entityHalf ||
+                feet.Z - playerHalf >= ez + entityHalf)
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private void HandleGlobalKeys(KeyboardState keyboard)
     {
         var escapePressed = keyboard.IsKeyDown(Keys.Escape) &&
@@ -1374,6 +1408,11 @@ public class Game1 : Game
 
     private bool Collides(Vector3 feet)
     {
+        if (CollidesEntity(feet))
+        {
+            return true;
+        }
+
         const float half = PlayerWidth * 0.5f;
         const float epsilon = 0.001f;
 
@@ -2374,6 +2413,15 @@ public class Game1 : Game
             var verts = new List<VertexPositionColor>();
             var inds = new List<int>();
 
+            // Entities are shaded by the light where they stand, just like blocks.
+            var lbx = (int)MathF.Floor(pos.X);
+            var lby = (int)MathF.Floor(pos.Y + 0.5f);
+            var lbz = (int)MathF.Floor(pos.Z);
+            var entityLight = _world.InBounds(lbx, lby, lbz)
+                ? _world.GetLight(lbx, lby, lbz)
+                : (byte)15;
+            var lightFactor = 0.35f + 0.65f * (entityLight / 15f);
+
             void AddBox(Vector3 origin, Vector3 min, Vector3 size, Color color, Matrix local)
             {
                 var o = origin + min;
@@ -2387,7 +2435,12 @@ public class Game1 : Game
                 for (var i = 0; i < 8; i++)
                 {
                     var corner = Vector3.Transform(o + c[i], local);
-                    verts.Add(new VertexPositionColor(corner, color));
+                    var shade = (i >= 4 ? 1f : 0.72f) * lightFactor;
+                    verts.Add(new VertexPositionColor(corner, new Color(
+                        (byte)(color.R * shade),
+                        (byte)(color.G * shade),
+                        (byte)(color.B * shade),
+                        color.A)));
                 }
                 // 12 triangles (2 per face)
                 int[] tris = { 0,1,2, 0,2,3, 4,6,5, 4,7,6, 0,4,5, 0,5,1, 2,6,7, 2,7,3, 0,3,7, 0,7,4, 1,5,6, 1,6,2 };

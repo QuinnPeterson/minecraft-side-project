@@ -132,7 +132,6 @@ public static class WorldMeshBuilder
 
                     var light = world.GetLight(x, y, z);
                     var target = definition.UsesTransparentPass ? transparent : opaque;
-
                     switch (definition.Shape)
                     {
                         case BlockShape.Water:
@@ -196,36 +195,52 @@ public static class WorldMeshBuilder
                 Tint(definition, 1f, world.GetLight(x, y + 1, z)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x, y - 1, z)))
+        if (y > 0 && IsFaceVisible(block, world.GetBlock(x, y - 1, z)))
         {
             AddFace(data, origin, BottomCorners, bottomUv, HorizontalUvs,
                 Tint(definition, 0.45f, world.GetLight(x, y - 1, z)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x, y, z - 1)))
+        if (FaceVisible(world, block, x, y, z, 0, 0, -1))
         {
             AddFace(data, origin, NorthCorners, sideUv, SideUvs,
                 Tint(definition, 0.72f, world.GetLight(x, y, z - 1)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x, y, z + 1)))
+        if (FaceVisible(world, block, x, y, z, 0, 0, 1))
         {
             AddFace(data, origin, SouthCorners, sideUv, SideUvs,
                 Tint(definition, 0.80f, world.GetLight(x, y, z + 1)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x - 1, y, z)))
+        if (FaceVisible(world, block, x, y, z, -1, 0, 0))
         {
             AddFace(data, origin, WestCorners, sideUv, SideUvs,
                 Tint(definition, 0.68f, world.GetLight(x - 1, y, z)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x + 1, y, z)))
+        if (FaceVisible(world, block, x, y, z, 1, 0, 0))
         {
             AddFace(data, origin, EastCorners, sideUv, SideUvs,
                 Tint(definition, 0.76f, world.GetLight(x + 1, y, z)));
         }
     }
+
+    /// <summary>
+    /// Faces on the outside of the world are never visible to a player inside
+    /// it, so skip them instead of building geometry for the world shell.
+    /// </summary>
+    private static bool FaceVisible(
+        World world,
+        BlockId current,
+        int x,
+        int y,
+        int z,
+        int dx,
+        int dy,
+        int dz) =>
+        world.InBounds(x + dx, y + dy, z + dz) &&
+        IsFaceVisible(current, world.GetBlock(x + dx, y + dy, z + dz));
 
     private static void AddWater(
         MeshData data,
@@ -245,7 +260,7 @@ public static class WorldMeshBuilder
         var h11 = GetWaterCornerHeight(world, x + 1, y, z + 1, fallback);
         var h01 = GetWaterCornerHeight(world, x, y, z + 1, fallback);
 
-        if (IsFaceVisible(block, world.GetBlock(x, y - 1, z)))
+        if (y > 0 && IsFaceVisible(block, world.GetBlock(x, y - 1, z)))
         {
             AddFace(data, origin, BottomCorners, uv, HorizontalUvs,
                 Tint(definition, 0.42f, world.GetLight(x, y - 1, z)));
@@ -265,7 +280,7 @@ public static class WorldMeshBuilder
                 Tint(definition, 1f, world.GetLight(x, y + 1, z)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x, y, z - 1)))
+        if (FaceVisible(world, block, x, y, z, 0, 0, -1))
         {
             var north = new[]
             {
@@ -279,7 +294,7 @@ public static class WorldMeshBuilder
                 Tint(definition, 0.65f, world.GetLight(x, y, z - 1)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x, y, z + 1)))
+        if (FaceVisible(world, block, x, y, z, 0, 0, 1))
         {
             var south = new[]
             {
@@ -293,7 +308,7 @@ public static class WorldMeshBuilder
                 Tint(definition, 0.72f, world.GetLight(x, y, z + 1)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x - 1, y, z)))
+        if (FaceVisible(world, block, x, y, z, -1, 0, 0))
         {
             var west = new[]
             {
@@ -307,7 +322,7 @@ public static class WorldMeshBuilder
                 Tint(definition, 0.62f, world.GetLight(x - 1, y, z)));
         }
 
-        if (IsFaceVisible(block, world.GetBlock(x + 1, y, z)))
+        if (FaceVisible(world, block, x, y, z, 1, 0, 0))
         {
             var east = new[]
             {
@@ -351,10 +366,10 @@ public static class WorldMeshBuilder
 
         var south = new[]
         {
-            new Vector3(0f, 0f, 1f),
-            new Vector3(0f, 0.125f, 1f),
-            new Vector3(1f, 0.125f, 1f),
             new Vector3(1f, 0f, 1f),
+            new Vector3(1f, 0.125f, 1f),
+            new Vector3(0f, 0.125f, 1f),
+            new Vector3(0f, 0f, 1f),
         };
 
         var west = new[]

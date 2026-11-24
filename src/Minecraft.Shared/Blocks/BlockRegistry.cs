@@ -280,6 +280,13 @@ public static class BlockRegistry
     public static bool IsLavaFlow(BlockId id) =>
         id >= BlockId.LavaFlow1 && id <= BlockId.LavaFlow7;
 
+    /// <summary>
+    /// How much sky light a block filters while still letting it through.
+    /// Leaves cast a soft shadow instead of letting full daylight hit the ground.
+    /// </summary>
+    public static byte SkyAttenuation(BlockId id) =>
+        id == BlockId.Leaves ? (byte)3 : (byte)0;
+
     public static bool IsFluid(BlockId id) => IsWater(id) || IsLava(id);
 
     public static bool IsCrop(BlockId id) => id >= BlockId.Wheat1 && id <= BlockId.Wheat7;
