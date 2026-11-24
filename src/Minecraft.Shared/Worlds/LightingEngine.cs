@@ -81,9 +81,15 @@ public sealed class LightingEngine
                         continue;
                     }
 
-                    // Leaves filter daylight, so the ground under a canopy is
-                    // dimmer than the surrounding surface.
-                    attenuation += BlockRegistry.SkyAttenuation(block);
+                    // Leaves filter daylight slightly, so canopies cast a soft
+                    // shadow. A contiguous canopy only filters once, so thick
+                    // trees do not turn the ground below nearly black.
+                    var filters = BlockRegistry.SkyAttenuation(block);
+
+                    if (filters > 0 && attenuation == 0)
+                    {
+                        attenuation += filters;
+                    }
 
                     if (columnSky > 0)
                     {
@@ -354,11 +360,14 @@ public sealed class LightingEngine
                 }
 
                 // Sky light travels straight down an open column without losing
-                // a level; leaves filter it, and every other step dims by one.
+                // a level; leaves filter it once, and other steps dim by one.
                 var attenuation = sky ? BlockRegistry.SkyAttenuation(_world.GetBlock(nx, ny, nz)) : (byte)0;
+                var inCanopy = attenuation > 0 &&
+                               BlockRegistry.SkyAttenuation(_world.GetBlock(node.X, node.Y, node.Z)) > 0;
+                var loss = inCanopy ? (byte)0 : Math.Max((byte)1, attenuation);
                 var level = sky && dy == -1 && attenuation == 0 && node.Level == SkyLightForColumn(nx, nz)
                     ? node.Level
-                    : (byte)Math.Max(0, node.Level - Math.Max((byte)1, attenuation));
+                    : (byte)Math.Max(0, node.Level - loss);
 
                 if (level <= GetLight(sky, nx, ny, nz))
                 {

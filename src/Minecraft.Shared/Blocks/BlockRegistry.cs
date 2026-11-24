@@ -285,7 +285,7 @@ public static class BlockRegistry
     /// Leaves cast a soft shadow instead of letting full daylight hit the ground.
     /// </summary>
     public static byte SkyAttenuation(BlockId id) =>
-        id == BlockId.Leaves ? (byte)3 : (byte)0;
+        id == BlockId.Leaves ? (byte)1 : (byte)0;
 
     public static bool IsFluid(BlockId id) => IsWater(id) || IsLava(id);
 
