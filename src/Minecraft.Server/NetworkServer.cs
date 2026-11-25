@@ -100,7 +100,8 @@ internal sealed class NetworkServer
             state.World,
             state.Sync,
             change => BroadcastBlockChange(worldId, change),
-            _log);
+            _log,
+            (type, x, y, z, data, _) => SpawnEntity(type, x, y, z, data, worldId));
 
         _worlds[id] = state;
     }
@@ -751,8 +752,10 @@ internal sealed class NetworkServer
                 e.Vz *= 0.9f;
             }
 
-            e.Vy -= gravity * dt;
-            if (e.Vy < -20f) e.Vy = -20f;
+            var entityGravity = e.Type == Minecraft.Shared.Entities.EntityType.FallingBlock ? 4f : gravity;
+            var terminalVy = e.Type == Minecraft.Shared.Entities.EntityType.FallingBlock ? -4f : -20f;
+            e.Vy -= entityGravity * dt;
+            if (e.Vy < terminalVy) e.Vy = terminalVy;
 
             e.X += e.Vx * dt;
             e.Y += e.Vy * dt;
@@ -774,7 +777,45 @@ internal sealed class NetworkServer
                 {
                     e.Y = gby + 1.5f;
                     e.Vy = 0;
+
+                    if (e.Type == Minecraft.Shared.Entities.EntityType.FallingBlock)
+                    {
+                        var placeY = gby + 1;
+                        var placed = false;
+
+                        lock (entityWorld.Sync)
+                        {
+                            if (entityWorld.World.InBounds(gbx, placeY, gbz))
+                            {
+                                var target = entityWorld.World.GetBlock(gbx, placeY, gbz);
+                                if (target == BlockId.Air || BlockRegistry.IsReplaceable(target))
+                                {
+                                    placed = entityWorld.World.SetBlock(gbx, placeY, gbz, (BlockId)e.Data);
+                                }
+                            }
+                        }
+
+                        if (placed)
+                        {
+                            BroadcastToWorld(e.World, CreateBlockUpdateMessage(DefaultGroupId, new BlockChange(gbx, placeY, gbz, (BlockId)e.Data, e.World)));
+                        }
+                        else
+                        {
+                            SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, e.Data, e.World);
+                        }
+
+                        toRemove.Add(e.Id);
+                        BroadcastToWorld(e.World, WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, e.Id));
+                        continue;
+                    }
                 }
+            }
+
+            if (e.Type == Minecraft.Shared.Entities.EntityType.FallingBlock && e.Y < -20)
+            {
+                toRemove.Add(e.Id);
+                BroadcastToWorld(e.World, WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, e.Id));
+                continue;
             }
 
             if (e.Health <= 0)
@@ -855,6 +896,8 @@ internal sealed class NetworkServer
 
                     if (a.Type == Minecraft.Shared.Entities.EntityType.Item ||
                         b.Type == Minecraft.Shared.Entities.EntityType.Item ||
+                        a.Type == Minecraft.Shared.Entities.EntityType.FallingBlock ||
+                        b.Type == Minecraft.Shared.Entities.EntityType.FallingBlock ||
                         a.World != b.World)
                     {
                         continue;
@@ -897,6 +940,12 @@ internal sealed class NetworkServer
     /// </summary>
     private void ResolvePlayerCollisions(ServerEntity entity)
     {
+        if (entity.Type == Minecraft.Shared.Entities.EntityType.Item ||
+            entity.Type == Minecraft.Shared.Entities.EntityType.FallingBlock)
+        {
+            return;
+        }
+
         const float entityHalf = 0.4f;
         const float playerHalf = 0.3f;
         const float entityHeight = 1f;
@@ -1064,10 +1113,17 @@ internal sealed class NetworkServer
                     player.Player.Position.ZPosition,
                     player.Player.Position.Yaw,
                     player.Player.Position.Pitch);
+
+                var nether = GetWorld((byte)Dimension.Nether);
+                joinPosition = FindPortalExit(nether, nether.SpawnX, nether.SpawnY, nether.SpawnZ, player.Player.Position.Yaw, player.Player.Position.Pitch);
             }
             else if (player.OverworldReturn is not null)
             {
-                joinPosition = player.OverworldReturn;
+                var overworld = GetWorld((byte)Dimension.Overworld);
+                var rx = (int)MathF.Floor(player.OverworldReturn.XPosition);
+                var ry = (int)MathF.Floor(player.OverworldReturn.YPosition);
+                var rz = (int)MathF.Floor(player.OverworldReturn.ZPosition);
+                joinPosition = FindPortalExit(overworld, rx, ry, rz, player.OverworldReturn.Yaw, player.OverworldReturn.Pitch);
             }
 
             player.World = destination;
@@ -1079,6 +1135,45 @@ internal sealed class NetworkServer
             var destName = destination == (byte)Dimension.Nether ? "the Nether" : "the Overworld";
             _log($"{player.Player.Username} entered {destName}.");
         }
+    }
+
+    private static Position FindPortalExit(WorldState state, int x, int y, int z, float yaw, float pitch)
+    {
+        // Prefer stepping out to the side of the portal so the player doesn't
+        // immediately re-enter it after teleport cooldown expires.
+        Span<(int dx, int dz)> offsets = stackalloc (int, int)[]
+        {
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (-1, 1), (1, -1), (-1, -1),
+            (2, 0), (-2, 0), (0, 2), (0, -2),
+        };
+
+        lock (state.Sync)
+        {
+            foreach (var (dx, dz) in offsets)
+            {
+                var px = x + dx;
+                var pz = z + dz;
+
+                for (var py = y + 2; py >= y - 2; py--)
+                {
+                    if (py <= 0 || py + 1 >= state.World.SizeY) continue;
+
+                    var feet = state.World.GetBlock(px, py, pz);
+                    var head = state.World.GetBlock(px, py + 1, pz);
+                    var below = state.World.GetBlock(px, py - 1, pz);
+
+                    if (feet == BlockId.NetherPortal || head == BlockId.NetherPortal) continue;
+                    if (feet != BlockId.Air && !BlockRegistry.IsReplaceable(feet)) continue;
+                    if (head != BlockId.Air && !BlockRegistry.IsReplaceable(head)) continue;
+                    if (below == BlockId.Air || BlockRegistry.IsReplaceable(below) || below == BlockId.NetherPortal) continue;
+
+                    return new Position(px + 0.5f, py, pz + 0.5f, yaw, pitch);
+                }
+            }
+        }
+
+        return new Position(x + 0.5f, y, z + 0.5f, yaw, pitch);
     }
 
     private void TrySpawnNetherMobs()

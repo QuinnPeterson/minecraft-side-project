@@ -168,11 +168,7 @@ public sealed class LightingEngine
             return 0;
         }
 
-        var edge = Math.Min(
-            Math.Min(x, _world.SizeX - 1 - x),
-            Math.Min(z, _world.SizeZ - 1 - z));
-        var reduction = edge == 0 ? 3 : edge == 1 ? 1 : 0;
-        return (byte)Math.Max(0, sky - reduction);
+        return sky;
     }
 
     /// <summary>Recomputes every light source in the world at a given time of day.</summary>
@@ -196,30 +192,34 @@ public sealed class LightingEngine
         var oldAttenuation = BlockRegistry.SkyAttenuation(oldBlock);
         var columnSky = SkyLightForColumn(x, z);
 
-        // Sky light only depends on opacity and filtering. Removing it from a
-        // cell that stays transparent would needlessly darken the column below,
-        // so only drop it when the block actually blocks or filters more sky.
-        if (newOpaque || oldAttenuation != newAttenuation)
+        var skyLevel = SkyLightForTime(_currentTimeOfDay);
+        if (skyLevel > 0)
         {
-            RemoveLight(true, x, y, z);
-        }
-
-        if (!newOpaque)
-        {
-            if (y == _world.SizeY - 1 ||
-                (y > 0 && _world.GetSkyLight(x, y - 1, z) == columnSky))
+            // Sky light only depends on opacity and filtering. Removing it from a
+            // cell that stays transparent would needlessly darken the column below,
+            // so only drop it when the block actually blocks or filters more sky.
+            if (newOpaque || oldAttenuation != newAttenuation)
             {
-                // The cell above is fully sky-lit, so this cell continues the
-                // shaft all the way down to bedrock without losing intensity.
-                SetSource(true, x, y, z, columnSky);
+                RemoveLight(true, x, y, z);
             }
-            else
-            {
-                SeedNeighbours(true, x, y, z);
-            }
-        }
 
-        Propagate(true, SkyLightForTime(_currentTimeOfDay));
+            if (!newOpaque)
+            {
+                if (y == _world.SizeY - 1 ||
+                    (y > 0 && _world.GetSkyLight(x, y - 1, z) == columnSky))
+                {
+                    // The cell above is fully sky-lit, so this cell continues the
+                    // shaft all the way down to bedrock without losing intensity.
+                    SetSource(true, x, y, z, columnSky);
+                }
+                else
+                {
+                    SeedNeighbours(true, x, y, z);
+                }
+            }
+
+            Propagate(true, skyLevel);
+        }
 
         // Block light: drop the old emitter and any light trapped inside a
         // newly opaque block, then let the neighbours refill the cell.
@@ -396,6 +396,19 @@ public sealed class LightingEngine
         }
     }
 
-    private void MarkChanged(int x, int z) =>
-        _changedChunks.Add((x / WorldProtocol.ChunkSize, z / WorldProtocol.ChunkSize));
+    private void MarkChanged(int x, int z)
+    {
+        var chunkX = x / WorldProtocol.ChunkSize;
+        var chunkZ = z / WorldProtocol.ChunkSize;
+        _changedChunks.Add((chunkX, chunkZ));
+
+        // A neighboring chunk meshes faces that sample light from this cell when
+        // the cell sits on the chunk border.
+        var localX = x % WorldProtocol.ChunkSize;
+        var localZ = z % WorldProtocol.ChunkSize;
+        if (localX == 0) _changedChunks.Add((chunkX - 1, chunkZ));
+        if (localX == WorldProtocol.ChunkSize - 1) _changedChunks.Add((chunkX + 1, chunkZ));
+        if (localZ == 0) _changedChunks.Add((chunkX, chunkZ - 1));
+        if (localZ == WorldProtocol.ChunkSize - 1) _changedChunks.Add((chunkX, chunkZ + 1));
+    }
 }

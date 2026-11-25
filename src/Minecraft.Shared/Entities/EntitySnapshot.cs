@@ -8,6 +8,7 @@ public enum EntityType : byte
     Sheep = 3,
     Ghast = 4,
     Pigman = 5,
+    FallingBlock = 6,
 }
 
 public readonly record struct EntitySnapshot(int Id, EntityType Type, float X, float Y, float Z, int Data);

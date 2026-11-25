@@ -151,7 +151,7 @@ public static class TerrainGenerator
                     {
                         world.SetBlock(x, surfaceY + 1, z, BlockId.TallGrass);
                     }
-                    else if (plantRoll < 0.120 && HasWaterNeighbor(world, x, surfaceY, z))
+                    else if (plantRoll < 0.20 && HasWaterNeighbor(world, x, surfaceY, z))
                     {
                         var caneHeight = 1 + random.Next(3);
 
@@ -187,6 +187,17 @@ public static class TerrainGenerator
                              world.GetBlock(x, surfaceY + 1, z) == BlockId.Air)
                     {
                         world.SetBlock(x, surfaceY + 1, z, BlockId.DeadBush);
+                    }
+                    else if (random.NextDouble() < 0.12 && HasWaterNeighbor(world, x, surfaceY, z))
+                    {
+                        var caneHeight = 1 + random.Next(3);
+                        for (var i = 1; i <= caneHeight; i++)
+                        {
+                            if (world.GetBlock(x, surfaceY + i, z) == BlockId.Air)
+                            {
+                                world.SetBlock(x, surfaceY + i, z, BlockId.SugarCane);
+                            }
+                        }
                     }
                 }
                 else if (ground == BlockId.Water && surfaceY == SeaLevel - 1 &&

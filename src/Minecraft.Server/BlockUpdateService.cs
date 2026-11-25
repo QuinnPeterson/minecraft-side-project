@@ -20,7 +20,8 @@ public sealed class BlockUpdateService : IDisposable
     private const int TicksPerSecond = 10;
     private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1.0 / TicksPerSecond);
     private const int MaximumFluidDepletion = 7;
-    private const int DropCheckDistance = 2;
+    private const int LavaMaximumFluidDepletion = 3;
+    private const int DropCheckDistance = 4;
     private const int PlantGrowthIntervalTicks = 20;
     private const int PlantGrowthSamples = 1024;
     private const int MaximumActiveCells = 24000;
@@ -30,6 +31,7 @@ public sealed class BlockUpdateService : IDisposable
     private readonly object _worldSync;
     private readonly Action<BlockChange> _broadcast;
     private readonly Action<string> _log;
+    private readonly Action<Minecraft.Shared.Entities.EntityType, float, float, float, int, byte>? _spawnEntity;
     private readonly ConcurrentQueue<BlockChange> _edits = new();
     private readonly HashSet<(int X, int Y, int Z)> _active = new();
     private readonly object _activeSync = new();
@@ -42,12 +44,14 @@ public sealed class BlockUpdateService : IDisposable
         World world,
         object worldSync,
         Action<BlockChange> broadcast,
-        Action<string> log)
+        Action<string> log,
+        Action<Minecraft.Shared.Entities.EntityType, float, float, float, int, byte>? spawnEntity = null)
     {
         _world = world;
         _worldSync = worldSync;
         _broadcast = broadcast;
         _log = log;
+        _spawnEntity = spawnEntity;
         _running = true;
         _thread = new Thread(Run)
         {
@@ -144,7 +148,8 @@ public sealed class BlockUpdateService : IDisposable
                     continue;
                 }
 
-                if (_world.GetBlock(change.X, change.Y, change.Z) == change.Block)
+                var old = _world.GetBlock(change.X, change.Y, change.Z);
+                if (old == change.Block)
                 {
                     continue;
                 }
@@ -157,6 +162,11 @@ public sealed class BlockUpdateService : IDisposable
                     if (change.Block == BlockId.Fire)
                     {
                         TryIgnitePortal(changes, change.X, change.Y, change.Z);
+                    }
+
+                    if (change.Block == BlockId.Air && (old == BlockId.Obsidian || old == BlockId.NetherPortal))
+                    {
+                        BreakInvalidPortals(changes, change.X, change.Y, change.Z);
                     }
                 }
             }
@@ -239,15 +249,20 @@ public sealed class BlockUpdateService : IDisposable
 
         var target = _world.GetBlock(x, below, z);
 
-        if (target != BlockId.Air && !BlockRegistry.IsPlant(target) && !BlockRegistry.IsWater(target))
+        if (target != BlockId.Air && !BlockRegistry.IsPlant(target) && !BlockRegistry.IsWater(target) && !BlockRegistry.IsLava(target))
         {
             return;
         }
 
         SetBlock(changes, x, y, z, BlockId.Air);
-        SetBlock(changes, x, below, z, block);
 
-        Activate(x, below, z);
+        _spawnEntity?.Invoke(
+            Minecraft.Shared.Entities.EntityType.FallingBlock,
+            x + 0.5f,
+            y + 0.5f,
+            z + 0.5f,
+            (int)block,
+            0);
     }
 
     private void DoPlantSupport(List<BlockChange> changes, int x, int y, int z, BlockId block)
@@ -330,8 +345,10 @@ public sealed class BlockUpdateService : IDisposable
             return;
         }
 
+        var maxDepletion = BlockRegistry.IsLava(current) ? LavaMaximumFluidDepletion : MaximumFluidDepletion;
+
         // Inward flow (neighboring fluid levels feeding this cell).
-        if (inward > MaximumFluidDepletion)
+        if (inward > maxDepletion)
         {
             SetBlock(changes, x, y, z, BlockId.Air);
             return;
@@ -435,7 +452,8 @@ public sealed class BlockUpdateService : IDisposable
             }
         }
 
-        if (currentLevel >= MaximumFluidDepletion)
+        var maxDepletion = water ? MaximumFluidDepletion : LavaMaximumFluidDepletion;
+        if (currentLevel >= maxDepletion)
         {
             return outwardFlow.ToArray();
         }
@@ -555,8 +573,22 @@ public sealed class BlockUpdateService : IDisposable
 
         var targetBlock = GetBlock(flow.TargetBlock);
 
+        // Water-lava interactions (Minecraft): water + lava source = obsidian,
+        // lava + water = stone/cobblestone.
         if (BlockRegistry.IsFluid(targetBlock))
         {
+            if (flow.Water && BlockRegistry.IsLava(targetBlock))
+            {
+                var result = targetBlock == BlockId.Lava ? BlockId.Obsidian : BlockId.Cobblestone;
+                SetBlock(changes, flow.TargetBlock.X, flow.TargetBlock.Y, flow.TargetBlock.Z, result);
+                ActivateNeighbors(flow.TargetBlock.X, flow.TargetBlock.Y, flow.TargetBlock.Z);
+            }
+            else if (!flow.Water && BlockRegistry.IsWater(targetBlock))
+            {
+                SetBlock(changes, flow.TargetBlock.X, flow.TargetBlock.Y, flow.TargetBlock.Z, BlockId.Stone);
+                ActivateNeighbors(flow.TargetBlock.X, flow.TargetBlock.Y, flow.TargetBlock.Z);
+            }
+
             return;
         }
 
@@ -565,7 +597,8 @@ public sealed class BlockUpdateService : IDisposable
             return;
         }
 
-        var level = Math.Min((int)flow.Level, MaximumFluidDepletion);
+        var maxDepletion = flow.Water ? MaximumFluidDepletion : LavaMaximumFluidDepletion;
+        var level = Math.Min((int)flow.Level, maxDepletion);
         var block = flow.Water
             ? BlockRegistry.WaterBlockForLevel(level)
             : BlockRegistry.LavaBlockForLevel(level);
@@ -767,7 +800,7 @@ public sealed class BlockUpdateService : IDisposable
             var nz = alongX ? z : z + minOffset - 1;
             if (!_world.InBounds(nx, y, nz) || !IsPortalInterior(_world.GetBlock(nx, y, nz))) break;
             minOffset--;
-            if (minOffset < -3) return;
+            if (minOffset < -22) return;
         }
 
         var baseX = alongX ? x + minOffset : x;
@@ -779,9 +812,9 @@ public sealed class BlockUpdateService : IDisposable
             baseY--;
         }
 
-        for (var width = 2; width <= 3; width++)
+        for (var width = 2; width <= 21; width++)
         {
-            for (var height = 3; height <= 4; height++)
+            for (var height = 3; height <= 21; height++)
             {
                 if (IsValidPortalFrame(baseX, baseY, baseZ, width, height, alongX))
                 {
@@ -810,10 +843,11 @@ public sealed class BlockUpdateService : IDisposable
                 if (!_world.InBounds(px, py, pz)) return false;
 
                 var frame = dx == -1 || dx == width || dy == -1 || dy == height;
+                var corner = (dx == -1 || dx == width) && (dy == -1 || dy == height);
                 var block = _world.GetBlock(px, py, pz);
                 if (frame)
                 {
-                    if (block != BlockId.Obsidian) return false;
+                    if (!corner && block != BlockId.Obsidian) return false;
                 }
                 else
                 {
@@ -846,6 +880,180 @@ public sealed class BlockUpdateService : IDisposable
                     changes.Add(new BlockChange(px, py, pz, BlockId.NetherPortal));
                     ActivateNeighbors(px, py, pz);
                 }
+            }
+        }
+    }
+
+    private void BreakInvalidPortals(List<BlockChange> changes, int x, int y, int z)
+    {
+        Span<(int dx, int dy, int dz)> neighbors = stackalloc (int, int, int)[]
+        {
+            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+        };
+
+        for (var i = 0; i < neighbors.Length; i++)
+        {
+            var nx = x + neighbors[i].dx;
+            var ny = y + neighbors[i].dy;
+            var nz = z + neighbors[i].dz;
+            if (!_world.InBounds(nx, ny, nz)) continue;
+            if (_world.GetBlock(nx, ny, nz) != BlockId.NetherPortal) continue;
+
+            CollapsePortalIfInvalid(changes, nx, ny, nz);
+        }
+    }
+
+    private void CollapsePortalIfInvalid(List<BlockChange> changes, int x, int y, int z)
+    {
+        if (_world.GetBlock(x, y, z) != BlockId.NetherPortal)
+        {
+            return;
+        }
+
+        var hasX = _world.GetBlock(x + 1, y, z) == BlockId.NetherPortal ||
+                   _world.GetBlock(x - 1, y, z) == BlockId.NetherPortal;
+        var hasZ = _world.GetBlock(x, y, z + 1) == BlockId.NetherPortal ||
+                   _world.GetBlock(x, y, z - 1) == BlockId.NetherPortal;
+
+        var alongX = hasX || !hasZ;
+
+        if (IsPortalRegionValid(x, y, z, alongX))
+        {
+            return;
+        }
+
+        var other = !alongX;
+        if (IsPortalRegionValid(x, y, z, other))
+        {
+            return;
+        }
+
+        // Remove the detected orientation first; removing the wrong one would
+        // delete only the start block and leave the real portal behind.
+        RemovePortalRegion(changes, x, y, z, alongX);
+        if (_world.InBounds(x, y, z) && _world.GetBlock(x, y, z) == BlockId.NetherPortal)
+        {
+            RemovePortalRegion(changes, x, y, z, other);
+        }
+    }
+
+    private bool IsPortalRegionValid(int x, int y, int z, bool alongX)
+    {
+        if (!TryGetPortalBounds(x, y, z, alongX, out var minX, out var minY, out var minZ, out var maxX, out var maxY, out var maxZ))
+        {
+            return false;
+        }
+
+        var width = alongX ? maxX - minX + 1 : maxZ - minZ + 1;
+        var height = maxY - minY + 1;
+        if (width < 2 || height < 3 || width > 21 || height > 21)
+        {
+            return false;
+        }
+
+        for (var dx = -1; dx <= width; dx++)
+        {
+            for (var dy = -1; dy <= height; dy++)
+            {
+                var px = alongX ? minX + dx : minX;
+                var py = minY + dy;
+                var pz = alongX ? minZ : minZ + dx;
+                if (!_world.InBounds(px, py, pz)) return false;
+
+                var frame = dx == -1 || dx == width || dy == -1 || dy == height;
+                var corner = (dx == -1 || dx == width) && (dy == -1 || dy == height);
+                var block = _world.GetBlock(px, py, pz);
+                if (frame)
+                {
+                    if (!corner && block != BlockId.Obsidian) return false;
+                }
+                else
+                {
+                    if (block != BlockId.NetherPortal) return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryGetPortalBounds(int x, int y, int z, bool alongX, out int minX, out int minY, out int minZ, out int maxX, out int maxY, out int maxZ)
+    {
+        minX = maxX = x;
+        minY = maxY = y;
+        minZ = maxZ = z;
+
+        if (_world.GetBlock(x, y, z) != BlockId.NetherPortal)
+        {
+            return false;
+        }
+
+        var queue = new Queue<(int x, int y, int z)>();
+        var visited = new HashSet<(int x, int y, int z)>();
+        queue.Enqueue((x, y, z));
+        visited.Add((x, y, z));
+
+        while (queue.Count > 0)
+        {
+            var (cx, cy, cz) = queue.Dequeue();
+            minX = Math.Min(minX, cx); maxX = Math.Max(maxX, cx);
+            minY = Math.Min(minY, cy); maxY = Math.Max(maxY, cy);
+            minZ = Math.Min(minZ, cz); maxZ = Math.Max(maxZ, cz);
+
+            var dirs = alongX
+                ? new[] { (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0) }
+                : new[] { (0, 0, 1), (0, 0, -1), (0, 1, 0), (0, -1, 0) };
+
+            foreach (var (dx, dy, dz) in dirs)
+            {
+                var n = (cx + dx, cy + dy, cz + dz);
+                if (visited.Contains(n)) continue;
+                if (!_world.InBounds(n.Item1, n.Item2, n.Item3)) continue;
+                if (_world.GetBlock(n.Item1, n.Item2, n.Item3) != BlockId.NetherPortal) continue;
+                visited.Add(n);
+                queue.Enqueue(n);
+            }
+        }
+
+        // For an alongX portal, Z should be constant; for alongZ, X should be constant.
+        if (alongX && minZ != maxZ) return false;
+        if (!alongX && minX != maxX) return false;
+        return true;
+    }
+
+    private void RemovePortalRegion(List<BlockChange> changes, int x, int y, int z, bool alongX)
+    {
+        if (_world.GetBlock(x, y, z) != BlockId.NetherPortal)
+        {
+            return;
+        }
+
+        var queue = new Queue<(int x, int y, int z)>();
+        var visited = new HashSet<(int x, int y, int z)>();
+        queue.Enqueue((x, y, z));
+        visited.Add((x, y, z));
+
+        while (queue.Count > 0)
+        {
+            var (cx, cy, cz) = queue.Dequeue();
+            if (_world.SetBlock(cx, cy, cz, BlockId.Air))
+            {
+                changes.Add(new BlockChange(cx, cy, cz, BlockId.Air));
+                ActivateNeighbors(cx, cy, cz);
+            }
+
+            var dirs = alongX
+                ? new[] { (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0) }
+                : new[] { (0, 0, 1), (0, 0, -1), (0, 1, 0), (0, -1, 0) };
+
+            foreach (var (dx, dy, dz) in dirs)
+            {
+                var n = (cx + dx, cy + dy, cz + dz);
+                if (visited.Contains(n)) continue;
+                if (!_world.InBounds(n.Item1, n.Item2, n.Item3)) continue;
+                if (_world.GetBlock(n.Item1, n.Item2, n.Item3) != BlockId.NetherPortal) continue;
+                visited.Add(n);
+                queue.Enqueue(n);
             }
         }
     }

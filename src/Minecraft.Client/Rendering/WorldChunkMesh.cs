@@ -17,7 +17,8 @@ public sealed class WorldChunkMesh : IDisposable
     public WorldChunkMesh(
         GraphicsDevice device,
         MeshData opaque,
-        MeshData transparent)
+        MeshData transparent,
+        MeshData glass)
     {
         Opaque = new PrimitiveMesh<VertexPositionColorTexture>(
             device,
@@ -28,16 +29,24 @@ public sealed class WorldChunkMesh : IDisposable
             device,
             transparent.Vertices,
             transparent.Indices);
+
+        Glass = new PrimitiveMesh<VertexPositionColorTexture>(
+            device,
+            glass.Vertices,
+            glass.Indices);
     }
 
     public PrimitiveMesh<VertexPositionColorTexture> Opaque { get; }
 
     public PrimitiveMesh<VertexPositionColorTexture> Transparent { get; }
 
+    public PrimitiveMesh<VertexPositionColorTexture> Glass { get; }
+
     public void Dispose()
     {
         Opaque.Dispose();
         Transparent.Dispose();
+        Glass.Dispose();
     }
 }
 
@@ -108,6 +117,7 @@ public static class WorldMeshBuilder
     {
         var opaque = new MeshData();
         var transparent = new MeshData();
+        var glass = new MeshData();
 
         var baseX = chunkX * ChunkSize;
         var baseZ = chunkZ * ChunkSize;
@@ -131,7 +141,11 @@ public static class WorldMeshBuilder
                     }
 
                     var light = world.GetLight(x, y, z);
-                    var target = definition.UsesTransparentPass ? transparent : opaque;
+                    var target = definition.Shape == BlockShape.Glass
+                        ? glass
+                        : definition.UsesTransparentPass
+                            ? transparent
+                            : opaque;
                     switch (definition.Shape)
                     {
                         case BlockShape.Water:
@@ -182,7 +196,7 @@ public static class WorldMeshBuilder
             }
         }
 
-        return new WorldChunkMesh(device, opaque, transparent);
+        return new WorldChunkMesh(device, opaque, transparent, glass);
     }
 
     private static void AddCube(
@@ -624,7 +638,18 @@ public static class WorldMeshBuilder
             return false;
         }
 
-        return BlockRegistry.TryGet(neighbor, out var definition) && definition.IsTransparent;
+        if (!BlockRegistry.TryGet(neighbor, out var definition))
+        {
+            return false;
+        }
+
+        // Glass: only show faces against air/liquids to avoid transparent overdraw artifacts.
+        if (current == BlockId.Glass)
+        {
+            return BlockRegistry.IsWater(neighbor) || BlockRegistry.IsLava(neighbor);
+        }
+
+        return definition.IsTransparent;
     }
 
     /// <summary>

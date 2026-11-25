@@ -516,6 +516,7 @@ public class Game1 : Game
         }
 
         // Playing state (existing)
+        _frameCount++;
         _fpsTimer += gameTime.ElapsedGameTime.TotalSeconds;
 
         if (_fpsTimer >= 1.0)
@@ -579,10 +580,16 @@ public class Game1 : Game
             _clouds.Draw(GraphicsDevice, _texturedEffect, cloudOffset);
         }
 
-        // Transparent world, far chunks first so water blends over distant water.
+        // Glass: separate mesh, drawn before translucent water.
         GraphicsDevice.BlendState = BlendState.AlphaBlend;
         GraphicsDevice.DepthStencilState = DepthStencilState.DepthRead;
 
+        foreach (var chunk in _chunkMeshes.Values)
+        {
+            DrawWorldMesh(chunk.Glass);
+        }
+
+        // Transparent world, far chunks first so water blends over distant water.
         foreach (var chunk in TransparentChunks(eye))
         {
             DrawWorldMesh(chunk);
@@ -1063,7 +1070,7 @@ public class Game1 : Game
 
         foreach (var e in _entities)
         {
-            if (e.Type == EntityType.Item)
+            if (e.Type == EntityType.Item || e.Type == EntityType.FallingBlock)
             {
                 continue;
             }
@@ -2065,16 +2072,19 @@ public class Game1 : Game
         }
 
         // The day/night cycle changes sky light, so the world has to be relit.
-        // Recompute once per in-game hour so the frame loop stays cheap.
+        // The nether has no sky light cycle, so skip the expensive full recompute.
         if (Math.Floor(_timeOfDay) != _lastLightingHour)
         {
-            var lightingTime = _dimension == (byte)Dimension.Nether ? 0f : (float)_timeOfDay;
-            _lighting.Compute(lightingTime);
             _lastLightingHour = Math.Floor(_timeOfDay);
 
-            foreach (var key in _loadedChunks)
+            if (_dimension != (byte)Dimension.Nether)
             {
-                _dirtyChunks.Add(key);
+                _lighting.Compute((float)_timeOfDay);
+
+                foreach (var key in _loadedChunks)
+                {
+                    _dirtyChunks.Add(key);
+                }
             }
         }
     }
@@ -2581,6 +2591,16 @@ public class Game1 : Game
                 AddBox(pos, new Vector3(-0.2f, 0f, -0.1f), new Vector3(0.18f, 0.75f, 0.2f), new Color(110, 80, 70), Matrix.Identity);
                 AddBox(pos, new Vector3(0.02f, 0f, -0.1f), new Vector3(0.18f, 0.75f, 0.2f), new Color(110, 80, 70), Matrix.Identity);
             }
+            else if (e.Type == EntityType.FallingBlock)
+            {
+                var blockId = (BlockId)e.Data;
+                var tint = BlockRegistry.TryGet(blockId, out var def) ? def.Tint : 0xFFFFFFu;
+                var color = new Color(
+                    (int)((tint >> 16) & 0xFF),
+                    (int)((tint >> 8) & 0xFF),
+                    (int)(tint & 0xFF));
+                AddBox(pos, new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(1f, 1f, 1f), color, Matrix.Identity);
+            }
             else // Item
             {
                 AddBox(pos, new Vector3(-0.15f, 0f, -0.15f), new Vector3(0.3f, 0.3f, 0.3f), Color.White, Matrix.Identity);
@@ -2606,7 +2626,9 @@ public class Game1 : Game
                     ? (new Vector3(pos.X - 1.3f, pos.Y + 0.2f, pos.Z - 1.3f), new Vector3(2.6f, 3.4f, 2.6f))
                     : e.Type == EntityType.Item
                         ? (new Vector3(pos.X - 0.2f, pos.Y, pos.Z - 0.2f), new Vector3(0.4f, 0.4f, 0.4f))
-                        : (new Vector3(pos.X - 0.6f, pos.Y, pos.Z - 0.5f), new Vector3(1.2f, 1.2f, 1.0f));
+                        : e.Type == EntityType.FallingBlock
+                            ? (new Vector3(pos.X - 0.5f, pos.Y - 0.5f, pos.Z - 0.5f), new Vector3(1f, 1f, 1f))
+                            : (new Vector3(pos.X - 0.6f, pos.Y, pos.Z - 0.5f), new Vector3(1.2f, 1.2f, 1.0f));
                 var hc = new[]
                 {
                     new Vector3(0,0,0), new Vector3(hs.X,0,0), new Vector3(hs.X,0,hs.Z), new Vector3(0,0,hs.Z),
