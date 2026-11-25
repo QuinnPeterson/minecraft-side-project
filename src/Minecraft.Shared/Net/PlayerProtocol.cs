@@ -10,6 +10,7 @@ public static class PlayerProtocol
     {
         message.Write(player.Username);
         message.WriteAllProperties(player.Position);
+        message.Write(player.World);
     }
 
     public static Player ReadPlayer(NetBuffer message)
@@ -17,7 +18,8 @@ public static class PlayerProtocol
         var username = message.ReadString();
         var position = new Position();
         message.ReadAllProperties(position);
-        return new Player(username, position);
+        var world = message.ReadByte();
+        return new Player(username, position) { World = world };
     }
 
     /// <summary>

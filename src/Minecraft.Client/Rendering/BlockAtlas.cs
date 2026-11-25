@@ -83,6 +83,59 @@ public static class BlockAtlas
 
         atlas.SetData(0, rect, pixels, 0, pixels.Length);
     }
+
+    public static void UpdateFireAnimation(Texture2D atlas, float time)
+    {
+        var rect = GetSourceRect(BlockTexture.Fire);
+        var pixels = new Color[TileSize * TileSize];
+
+        for (var y = 0; y < TileSize; y++)
+        {
+            for (var x = 0; x < TileSize; x++)
+            {
+                var flicker = MathF.Sin(time * 10f + x * 0.7f + y * 0.4f) * 0.5f + 0.5f;
+                var n = Rand(x, y, (int)(time * 6f) % 97 + 700);
+                var flame = y > 1 && n > 0.2f + (1f - y / 15f) * 0.25f;
+                if (!flame)
+                {
+                    pixels[y * TileSize + x] = Color.Transparent;
+                    continue;
+                }
+
+                var t = y / 15f;
+                pixels[y * TileSize + x] = new Color(
+                    (byte)255,
+                    (byte)Math.Clamp(220 - t * 170 + flicker * 30, 40, 255),
+                    (byte)Math.Clamp(60 - t * 50, 0, 120),
+                    (byte)(220 - t * 40));
+            }
+        }
+
+        atlas.SetData(0, rect, pixels, 0, pixels.Length);
+    }
+
+    public static void UpdatePortalAnimation(Texture2D atlas, float time)
+    {
+        var rect = GetSourceRect(BlockTexture.Portal);
+        var pixels = new Color[TileSize * TileSize];
+
+        for (var y = 0; y < TileSize; y++)
+        {
+            for (var x = 0; x < TileSize; x++)
+            {
+                var swirl = (MathF.Sin(x * 0.5f + time * 2.2f) + MathF.Cos(y * 0.7f - time * 1.7f)) * 0.25f + 0.5f;
+                var n = Rand(x, y, 1900) * 0.2f;
+                var v = Math.Clamp(swirl + n, 0f, 1f);
+                pixels[y * TileSize + x] = new Color(
+                    (byte)(80 + v * 90),
+                    (byte)(20 + v * 50),
+                    (byte)(150 + v * 90),
+                    (byte)(170 + v * 70));
+            }
+        }
+
+        atlas.SetData(0, rect, pixels, 0, pixels.Length);
+    }
     public static Rectangle GetCrackSourceRect(int stage)
     {
         stage = Math.Clamp(stage, 0, 9);
@@ -844,6 +897,34 @@ public static class BlockAtlas
                     return node
                         ? new Color(86, 142, 62)
                         : Noise(112, 180, 78, x, y, salt, 14);
+                });
+                break;
+
+            case BlockTexture.Fire:
+                FillTransparent(pixels, rect, (x, y) =>
+                {
+                    var n = Rand(x, y, salt);
+                    var tongue = (int)(n * 5) % 3;
+                    var flame = y > 2 + tongue && (x + y) % 2 == 0 ? n > 0.25f : n > 0.55f;
+                    if (!flame)
+                    {
+                        return Color.Transparent;
+                    }
+
+                    var t = y / 15f;
+                    return t < 0.45f
+                        ? new Color(255, (int)(210 - t * 120), 60, 230)
+                        : new Color(255, (int)(120 - (t - 0.45f) * 120), 20, 210);
+                });
+                break;
+
+            case BlockTexture.Portal:
+                FillTransparent(pixels, rect, (x, y) =>
+                {
+                    var n = Rand(x, y, salt);
+                    var swirl = ((x * 3 + y * 5 + (int)(n * 7)) % 9) / 9f;
+                    var alpha = (byte)(170 + swirl * 60);
+                    return new Color((byte)(90 + swirl * 70), (byte)(30 + swirl * 40), (byte)(160 + swirl * 80), alpha);
                 });
                 break;
 

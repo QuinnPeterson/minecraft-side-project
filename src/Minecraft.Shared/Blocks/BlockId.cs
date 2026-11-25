@@ -116,4 +116,8 @@ public enum BlockId : ushort
     WoolCyan = 232,
     WoolLightGray = 233,
     WoolRed = 234,
+
+    // Simulation-only flame and portal blocks.
+    Fire = 242,
+    NetherPortal = 243,
 }

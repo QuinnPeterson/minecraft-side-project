@@ -127,6 +127,12 @@ public static class BlockRegistry
         new(BlockId.LavaFlow7, "Flowing Lava 7", 0xE27019, IsSolid: false, IsTransparent: false,
             Alpha: 1f, Shape: BlockShape.Cube, Texture: BlockTexture.Lava),
 
+        // Fire and nether portals are created by the simulation, not the palette.
+        new(BlockId.Fire, "Fire", 0xFF7B21, IsSolid: false, IsTransparent: true,
+            Alpha: 0.85f, Shape: BlockShape.Fire, Texture: BlockTexture.Fire),
+        new(BlockId.NetherPortal, "Nether Portal", 0x8B4FD6, IsSolid: false, IsTransparent: true,
+            Alpha: 0.75f, Shape: BlockShape.Portal, Texture: BlockTexture.Portal),
+
         // Crop growth stages share one texture and change tint as they ripen.
         new(BlockId.Wheat1, "Wheat", 0x6FBF3F, IsSolid: false, IsTransparent: true,
             Shape: BlockShape.Cross, Texture: BlockTexture.Wheat, Tint: 0x7ACB45),
@@ -215,6 +221,8 @@ public static class BlockRegistry
         table[(int)BlockId.LavaFlow5] = 15;
         table[(int)BlockId.LavaFlow6] = 15;
         table[(int)BlockId.LavaFlow7] = 15;
+        table[(int)BlockId.Fire] = 15;
+        table[(int)BlockId.NetherPortal] = 10;
         return table;
     }
 
@@ -244,6 +252,8 @@ public static class BlockRegistry
             !IsLavaFlow(block.Id) &&
             block.Id != BlockId.Water &&
             block.Id != BlockId.WaterFalling &&
+            block.Id != BlockId.Fire &&
+            block.Id != BlockId.NetherPortal &&
             block.Id != BlockId.Wheat2 &&
             block.Id != BlockId.Wheat3 &&
             block.Id != BlockId.Wheat4 &&
@@ -304,7 +314,18 @@ public static class BlockRegistry
 
     /// <summary>True when a placed block may overwrite this cell.</summary>
     public static bool IsReplaceable(BlockId id) =>
-        id == BlockId.Air || IsWater(id) || IsPlant(id);
+        id == BlockId.Air || IsWater(id) || IsPlant(id) ||
+        id == BlockId.Fire || id == BlockId.NetherPortal;
+
+    /// <summary>Blocks that can catch fire from a nearby flame.</summary>
+    public static bool IsFlammable(BlockId id) =>
+        id is BlockId.Wood or BlockId.WoodenPlanks or BlockId.Leaves or
+            BlockId.Sapling or BlockId.TallGrass or BlockId.DeadBush or
+            BlockId.Bookshelf or BlockId.CraftingTable ||
+        IsWool(id);
+
+    private static bool IsWool(BlockId id) =>
+        id == BlockId.Wool || (id >= BlockId.WoolOrange && id <= BlockId.WoolRed);
 
     /// <summary>True when the selection ray may stop on this block.</summary>
     public static bool IsTargetable(BlockId id) =>

@@ -7,11 +7,10 @@ namespace Minecraft.Server;
 
 internal static class Program
 {
-    private const int WorldSizeX = 128;
-    private const int WorldSizeZ = 128;
+    private const int WorldSizeX = 256;
+    private const int WorldSizeZ = 256;
     private const int WorldHeight = 128;
 
-    private static World _world = null!;
     private static NetworkServer _network = null!;
     private static Thread _networkThread = null!;
     private static CancellationTokenSource _stop = null!;
@@ -28,22 +27,20 @@ internal static class Program
             ? requestedSeed
             : Random.Shared.Next();
 
-        Console.WriteLine($"Generating a {WorldSizeX} x {WorldHeight} x {WorldSizeZ} world (seed {seed})...");
+        Console.WriteLine($"Generating overworld {WorldSizeX} x {WorldHeight} x {WorldSizeZ} (seed {seed})...");
         var started = DateTime.UtcNow;
-        var generated = TerrainGenerator.Generate(WorldSizeX, WorldSizeZ, WorldHeight, seed);
-        _world = generated.World;
+        var overworld = TerrainGenerator.Generate(WorldSizeX, WorldSizeZ, WorldHeight, seed);
+        var nether = TerrainGenerator.GenerateNether(128, 128, 128, seed);
         Console.WriteLine($"Terrain generated in {(DateTime.UtcNow - started).TotalSeconds:0.0}s.");
-        Console.WriteLine($"Spawn: {generated.SpawnX},{generated.SpawnY},{generated.SpawnZ}");
+        Console.WriteLine($"Overworld spawn: {overworld.SpawnX},{overworld.SpawnY},{overworld.SpawnZ}");
+        Console.WriteLine($"Nether spawn: {nether.SpawnX},{nether.SpawnY},{nether.SpawnZ}");
 
         _network = new NetworkServer(
-            _world,
-            generated.Seed,
-            generated.SpawnX,
-            generated.SpawnY,
-            generated.SpawnZ,
+            overworld,
+            nether,
             message => Console.WriteLine(message));
 
-        Console.WriteLine($"World size: {_world.SizeX} x {_world.SizeY} x {_world.SizeZ}");
+        Console.WriteLine($"Overworld: {overworld.World.SizeX} x {overworld.World.SizeY} x {overworld.World.SizeZ}");
         Console.WriteLine($"{BlockRegistry.All.Count} block types loaded from the shared library:");
         PrintBlocks();
         Console.WriteLine();

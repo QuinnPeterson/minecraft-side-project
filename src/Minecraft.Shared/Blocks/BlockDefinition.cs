@@ -13,6 +13,8 @@ public enum BlockShape : byte
     Farmland,
     SnowLayer,
     Glass,
+    Fire,
+    Portal,
 }
 
 /// <summary>
@@ -83,6 +85,8 @@ public enum BlockTexture : byte
     RedMushroom,
     DeadBush,
     SugarCane,
+    Fire,
+    Portal,
 }
 
 /// <summary>

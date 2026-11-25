@@ -6,6 +6,8 @@ public enum EntityType : byte
     Pig = 1,
     Cow = 2,
     Sheep = 3,
+    Ghast = 4,
+    Pigman = 5,
 }
 
 public readonly record struct EntitySnapshot(int Id, EntityType Type, float X, float Y, float Z, int Data);

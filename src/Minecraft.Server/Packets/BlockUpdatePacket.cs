@@ -15,7 +15,7 @@ internal sealed class BlockUpdatePacket : IPacket
             return;
         }
 
-        if (!server.SetBlock(groupId, change))
+        if (!server.SetBlock(groupId, change, message.SenderConnection))
         {
             return;
         }

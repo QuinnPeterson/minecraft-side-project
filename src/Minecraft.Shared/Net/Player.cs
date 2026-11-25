@@ -7,6 +7,9 @@ public sealed class Player
 
     public Position Position { get; set; } = new();
 
+    /// <summary>Current dimension/world id (0=overworld, 1=nether).</summary>
+    public byte World { get; set; }
+
     public Player()
     {
     }

@@ -161,6 +161,19 @@ public static class WorldMeshBuilder
                             AddSnowLayer(target, world, x, y, z, definition, light);
                             break;
 
+                        case BlockShape.Fire:
+                            AddCross(
+                                target,
+                                new Vector3(x, y, z),
+                                1f,
+                                BlockAtlas.GetUvRect(definition.Texture),
+                                Tint(definition, 1f, 15));
+                            break;
+
+                        case BlockShape.Portal:
+                            AddPortal(target, world, x, y, z, definition);
+                            break;
+
                         default:
                             AddCube(target, world, x, y, z, definition);
                             break;
@@ -465,6 +478,55 @@ public static class WorldMeshBuilder
         AddFace(data, origin,
             new[] { Corner(EastCorners[0]), Corner(EastCorners[1]), Corner(EastCorners[2]), Corner(EastCorners[3]) },
             sideUv, SideUvs, Tint(definition, 0.76f, light));
+    }
+
+    private static void AddPortal(
+        MeshData data,
+        World world,
+        int x,
+        int y,
+        int z,
+        BlockDefinition definition)
+    {
+        var origin = new Vector3(x, y, z);
+        var uv = BlockAtlas.GetUvRect(definition.Texture);
+        var color = Tint(definition, 1f, 15);
+
+        var alongX = world.GetBlock(x - 1, y, z) == BlockId.NetherPortal ||
+                     world.GetBlock(x + 1, y, z) == BlockId.NetherPortal ||
+                     world.GetBlock(x - 1, y, z) == BlockId.Obsidian ||
+                     world.GetBlock(x + 1, y, z) == BlockId.Obsidian;
+
+        if (alongX)
+        {
+            AddQuad(data, origin,
+                new Vector3(0f, 0f, 0.5f),
+                new Vector3(0f, 1f, 0.5f),
+                new Vector3(1f, 1f, 0.5f),
+                new Vector3(1f, 0f, 0.5f),
+                uv, color);
+            AddQuad(data, origin,
+                new Vector3(1f, 0f, 0.5f),
+                new Vector3(1f, 1f, 0.5f),
+                new Vector3(0f, 1f, 0.5f),
+                new Vector3(0f, 0f, 0.5f),
+                uv, color);
+        }
+        else
+        {
+            AddQuad(data, origin,
+                new Vector3(0.5f, 0f, 0f),
+                new Vector3(0.5f, 1f, 0f),
+                new Vector3(0.5f, 1f, 1f),
+                new Vector3(0.5f, 0f, 1f),
+                uv, color);
+            AddQuad(data, origin,
+                new Vector3(0.5f, 0f, 1f),
+                new Vector3(0.5f, 1f, 1f),
+                new Vector3(0.5f, 1f, 0f),
+                new Vector3(0.5f, 0f, 0f),
+                uv, color);
+        }
     }
 
     private static void AddCross(

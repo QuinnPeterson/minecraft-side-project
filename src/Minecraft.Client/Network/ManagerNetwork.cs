@@ -74,6 +74,16 @@ internal sealed class ManagerNetwork : IDisposable
     public ConcurrentQueue<int> EntityHits { get; } = new();
     public ConcurrentQueue<float> TimeUpdates { get; } = new();
 
+    public void ClearWorldQueues()
+    {
+        // Chunks/changes carry a world id and are filtered on apply; clearing them
+        // here would drop valid chunks that arrived alongside the WorldInfo.
+        while (EntitySpawns.TryDequeue(out _)) { }
+        while (EntityUpdates.TryDequeue(out _)) { }
+        while (EntityRemoves.TryDequeue(out _)) { }
+        while (EntityHits.TryDequeue(out _)) { }
+    }
+
     public void Start()
     {
         if (_running)

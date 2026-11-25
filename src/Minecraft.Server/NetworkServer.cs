@@ -1,6 +1,6 @@
-﻿//------------------------------------------------------
+//------------------------------------------------------
 // Adapted from LetsCreateNetworkGame.Server.Server
-// Copyright - (c) - 2014 - Mille BostrÃ¶m
+// Copyright - (c) - 2014 - Mille Boström
 //------------------------------------------------------
 
 using System.Collections.Concurrent;
@@ -31,6 +31,7 @@ internal sealed class NetworkServer
         public int Health = 10;
         public float HurtTimer;
         public int Data;
+        public byte World;
 
         public ServerEntity(int id, Minecraft.Shared.Entities.EntityType type, float x, float y, float z, int data)
         {
@@ -42,12 +43,19 @@ internal sealed class NetworkServer
 
     private const int SocketBufferSize = 4 * 1024 * 1024;
 
-    private readonly World _world;
-    private readonly int _seed;
-    private readonly int _spawnX;
-    private readonly int _spawnY;
-    private readonly int _spawnZ;
-    private readonly object _worldSync = new();
+    private sealed class WorldState
+    {
+        public byte Id;
+        public World World = null!;
+        public int Seed;
+        public int SpawnX, SpawnY, SpawnZ;
+        public readonly object Sync = new();
+        public BlockUpdateService Simulation = null!;
+    }
+
+    private readonly Dictionary<byte, WorldState> _worlds = new();
+
+    private WorldState GetWorld(byte id) => _worlds[id];
     private readonly object _playersSync = new();
     private readonly List<PlayerConnection> _players = new();
     private readonly object _entitiesSync = new();
@@ -58,33 +66,43 @@ internal sealed class NetworkServer
     private readonly ConcurrentDictionary<NetConnection, ConcurrentQueue<NetOutgoingMessage>> _pending = new();
     private readonly ConcurrentDictionary<NetConnection, Queue<ChunkRequest>> _chunkStreams = new();
     private readonly Action<string> _log;
-    private readonly BlockUpdateService _simulation;
 
     private NetServer _netServer = null!;
 
     private const string DefaultGroupId = "world";
 
     public NetworkServer(
-        World world,
-        int seed,
-        int spawnX,
-        int spawnY,
-        int spawnZ,
+        TerrainGenerationResult overworld,
+        TerrainGenerationResult nether,
         Action<string> log)
     {
-        _world = world;
-        _seed = seed;
-        _spawnX = spawnX;
-        _spawnY = spawnY;
-        _spawnZ = spawnZ;
         _log = log;
-        _simulation = new BlockUpdateService(
-            _world,
-            _worldSync,
-            BroadcastBlockChange,
-            _log);
+        AddWorld((byte)Dimension.Overworld, overworld);
+        AddWorld((byte)Dimension.Nether, nether);
 
         // Mob spawning is deferred to Run() after the NetServer is created.
+    }
+
+    private void AddWorld(byte id, TerrainGenerationResult generated)
+    {
+        var state = new WorldState
+        {
+            Id = id,
+            World = generated.World,
+            Seed = generated.Seed,
+            SpawnX = generated.SpawnX,
+            SpawnY = generated.SpawnY,
+            SpawnZ = generated.SpawnZ,
+        };
+
+        var worldId = id;
+        state.Simulation = new BlockUpdateService(
+            state.World,
+            state.Sync,
+            change => BroadcastBlockChange(worldId, change),
+            _log);
+
+        _worlds[id] = state;
     }
 
     public NetServer NetServer => _netServer;
@@ -132,12 +150,13 @@ internal sealed class NetworkServer
         _log("Listening on UDP 14241 (Lidgren app 'networkGame').");
 
         // Spawn initial passive mobs now that the NetServer exists.
-        var rng = new Random(_seed);
+        var overworld = GetWorld((byte)Dimension.Overworld);
+        var rng = new Random(overworld.Seed);
         for (var i = 0; i < 8; i++)
         {
-            var mx = _spawnX + rng.Next(-20, 21);
-            var mz = _spawnZ + rng.Next(-20, 21);
-            var my = _spawnY + 1f;
+            var mx = overworld.SpawnX + rng.Next(-20, 21);
+            var mz = overworld.SpawnZ + rng.Next(-20, 21);
+            var my = overworld.SpawnY + 1f;
             var type = rng.Next(2) == 0
                 ? Minecraft.Shared.Entities.EntityType.Pig
                 : Minecraft.Shared.Entities.EntityType.Sheep;
@@ -182,7 +201,10 @@ internal sealed class NetworkServer
         }
         finally
         {
-            _simulation.Dispose();
+            foreach (var state in _worlds.Values)
+            {
+                state.Simulation.Dispose();
+            }
 
             if (_netServer.Status == NetPeerStatus.Running)
             {
@@ -254,45 +276,84 @@ internal sealed class NetworkServer
                 return;
             }
 
+            var overworld = GetWorld((byte)Dimension.Overworld);
             var random = new Random();
             var player = new Player(
                 username,
                 new Position(
-                    _spawnX + 0.5f + random.Next(-6, 7),
-                    _spawnY,
-                    _spawnZ + 0.5f + random.Next(-6, 7)));
+                    overworld.SpawnX + 0.5f + random.Next(-6, 7),
+                    overworld.SpawnY,
+                    overworld.SpawnZ + 0.5f + random.Next(-6, 7)));
 
             _players.Add(new PlayerConnection(player, message.SenderConnection, groupId));
+
+            message.SenderConnection.Approve();
+            _log($"Player '{username}' logged in from {message.SenderConnection.RemoteEndPoint}.");
+
+            QueueMessage(message.SenderConnection, CreatePlayerListMessage(groupId));
+            QueueWorld(message.SenderConnection, groupId, (byte)Dimension.Overworld, player);
+            Broadcast(CreatePlayerListMessage(groupId));
+        }
+    }
+
+    /// <summary>
+    /// Sends the world description, its entities and a spawn-first chunk stream
+    /// to one connection. Called at login and whenever a player uses a portal.
+    /// </summary>
+    private void QueueWorld(NetConnection connection, string groupId, byte dimension, Player player, Position? joinPosition = null)
+    {
+        var state = GetWorld(dimension);
+        var spawn = joinPosition ?? new Position(
+            state.SpawnX + 0.5f,
+            state.SpawnY,
+            state.SpawnZ + 0.5f,
+            player.Position.Yaw,
+            player.Position.Pitch);
+
+        player.World = dimension;
+        player.Position = new Position(spawn.XPosition, spawn.YPosition, spawn.ZPosition, spawn.Yaw, spawn.Pitch);
+
+        void SendOrQueue(NetOutgoingMessage message)
+        {
+            if (connection.Status == NetConnectionStatus.Connected)
+            {
+                _netServer.SendMessage(message, connection, NetDeliveryMethod.ReliableOrdered, 0);
+            }
+            else
+            {
+                QueueMessage(connection, message);
+            }
         }
 
-        message.SenderConnection.Approve();
-        _log($"Player '{username}' logged in from {message.SenderConnection.RemoteEndPoint}.");
+        SendOrQueue(CreateWorldInfoMessage(
+            groupId,
+            dimension,
+            (int)MathF.Floor(spawn.XPosition),
+            (int)MathF.Floor(spawn.YPosition),
+            (int)MathF.Floor(spawn.ZPosition)));
 
-        QueueMessage(message.SenderConnection, CreatePlayerListMessage(groupId));
-        QueueMessage(message.SenderConnection, CreateWorldInfoMessage(groupId));
-
-        // Send existing entities.
         lock (_entitiesSync)
         {
             foreach (var e in _entities)
             {
-                QueueMessage(
-                    message.SenderConnection,
-                    WorldProtocol.CreateEntitySpawn(_netServer, groupId, e.Id, e.Type, e.X, e.Y, e.Z, e.Data));
+                if (e.World != dimension)
+                {
+                    continue;
+                }
+
+                SendOrQueue(WorldProtocol.CreateEntitySpawn(_netServer, groupId, e.Id, e.Type, e.X, e.Y, e.Z, e.Data));
             }
         }
 
-        // Chunk snapshots are large, so they stream a few per tick instead of
-        // being flushed in one burst when the connection finishes approving.
-        var spawnChunkX = _spawnX / WorldProtocol.ChunkSize;
-        var spawnChunkZ = _spawnZ / WorldProtocol.ChunkSize;
+        var spawnChunkX = state.SpawnX / WorldProtocol.ChunkSize;
+        var spawnChunkZ = state.SpawnZ / WorldProtocol.ChunkSize;
         var requests = new List<ChunkRequest>();
 
-        for (var chunkX = 0; chunkX < _world.SizeX / WorldProtocol.ChunkSize; chunkX++)
+        for (var chunkX = 0; chunkX < state.World.SizeX / WorldProtocol.ChunkSize; chunkX++)
         {
-            for (var chunkZ = 0; chunkZ < _world.SizeZ / WorldProtocol.ChunkSize; chunkZ++)
+            for (var chunkZ = 0; chunkZ < state.World.SizeZ / WorldProtocol.ChunkSize; chunkZ++)
             {
-                requests.Add(new ChunkRequest(groupId, chunkX, chunkZ));
+                requests.Add(new ChunkRequest(groupId, chunkX, chunkZ, dimension));
             }
         }
 
@@ -307,7 +368,7 @@ internal sealed class NetworkServer
             return da.CompareTo(db);
         });
 
-        _chunkStreams[message.SenderConnection] = new Queue<ChunkRequest>(requests);
+        _chunkStreams[connection] = new Queue<ChunkRequest>(requests);
     }
 
     private void StreamChunks()
@@ -328,7 +389,7 @@ internal sealed class NetworkServer
             {
                 var request = queue.Dequeue();
                 var message = CreateChunkSnapshotMessage(
-                    request.GroupId, request.ChunkX, request.ChunkZ);
+                    request.GroupId, request.ChunkX, request.ChunkZ, request.World);
 
                 _netServer.SendMessage(
                     message,
@@ -379,25 +440,40 @@ internal sealed class NetworkServer
 
     private void HandleEntityPickup(int entityId)
     {
+        byte world = 0;
+        var removed = false;
+
         lock (_entitiesSync)
         {
-            _entities.RemoveAll(e => e.Id == entityId);
+            var entity = _entities.FirstOrDefault(e => e.Id == entityId);
+            if (entity is not null)
+            {
+                world = entity.World;
+                removed = _entities.Remove(entity);
+            }
         }
 
-        Broadcast(WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, entityId));
+        if (removed)
+        {
+            BroadcastToWorld(world, WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, entityId));
+        }
     }
+
     private void HandleEntityHit(int entityId)
     {
         ServerEntity? entity;
+        byte world = 0;
+
         lock (_entitiesSync)
         {
             entity = _entities.FirstOrDefault(e => e.Id == entityId);
             if (entity == null) return;
             entity.Health -= 4;
             entity.HurtTimer = 0.5f;
+            world = entity.World;
         }
 
-        Broadcast(WorldProtocol.CreateEntityHit(_netServer, DefaultGroupId, entityId));
+        BroadcastToWorld(world, WorldProtocol.CreateEntityHit(_netServer, DefaultGroupId, entityId));
     }
 
     private void HandleStatusChanged(NetIncomingMessage message)
@@ -468,6 +544,23 @@ internal sealed class NetworkServer
         }
     }
 
+    /// <summary>Sends a world-specific packet only to players in that world.</summary>
+    public void BroadcastToWorld(
+        byte world,
+        NetOutgoingMessage message,
+        NetDeliveryMethod deliveryMethod = NetDeliveryMethod.ReliableOrdered)
+    {
+        var connections = GetPlayers()
+            .Where(p => p.World == world)
+            .Select(p => p.Connection)
+            .ToList();
+
+        if (connections.Count > 0)
+        {
+            _netServer.SendMessage(message, connections, deliveryMethod, 0);
+        }
+    }
+
     public PlayerConnection? FindPlayer(string username)
     {
         lock (_playersSync)
@@ -503,31 +596,41 @@ internal sealed class NetworkServer
         return message;
     }
 
-    public NetOutgoingMessage CreateWorldInfoMessage(string groupId)
+    public NetOutgoingMessage CreateWorldInfoMessage(string groupId, byte dimension = 0, int? spawnX = null, int? spawnY = null, int? spawnZ = null)
     {
+        var state = GetWorld(dimension);
+
         return WorldProtocol.CreateWorldInfo(
             _netServer,
             groupId,
             new WorldInfo(
-                _world.SizeX,
-                _world.SizeY,
-                _world.SizeZ,
-                _seed,
-                _spawnX,
-                _spawnY,
-                _spawnZ));
+                state.World.SizeX,
+                state.World.SizeY,
+                state.World.SizeZ,
+                state.Seed,
+                spawnX ?? state.SpawnX,
+                spawnY ?? state.SpawnY,
+                spawnZ ?? state.SpawnZ,
+                dimension));
     }
 
-    public NetOutgoingMessage CreateChunkSnapshotMessage(string groupId, int chunkX, int chunkZ)
+    public NetOutgoingMessage CreateChunkSnapshotMessage(
+        string groupId,
+        int chunkX,
+        int chunkZ,
+        byte dimension = 0)
     {
-        lock (_worldSync)
+        var state = GetWorld(dimension);
+
+        lock (state.Sync)
         {
             return WorldProtocol.CreateChunkSnapshot(
                 _netServer,
                 groupId,
-                _world,
+                state.World,
                 chunkX,
-                chunkZ);
+                chunkZ,
+                dimension);
         }
     }
 
@@ -539,12 +642,30 @@ internal sealed class NetworkServer
             change.X,
             change.Y,
             change.Z,
-            change.Block);
+            change.Block,
+            change.World);
     }
 
-    public bool SetBlock(string groupId, BlockChange change)
+    public bool SetBlock(string groupId, BlockChange change, NetConnection? connection = null)
     {
-        if (!_world.InBounds(change.X, change.Y, change.Z))
+        byte dimension = 0;
+
+        if (connection is not null)
+        {
+            lock (_playersSync)
+            {
+                var player = _players.FirstOrDefault(p => p.Connection == connection);
+                if (player is not null)
+                {
+                    dimension = player.World;
+                }
+            }
+        }
+
+        change = change with { World = dimension };
+        var state = GetWorld(dimension);
+
+        if (!state.World.InBounds(change.X, change.Y, change.Z))
         {
             return false;
         }
@@ -559,9 +680,9 @@ internal sealed class NetworkServer
         {
             BlockId oldBlock;
 
-            lock (_worldSync)
+            lock (state.Sync)
             {
-                oldBlock = _world.GetBlock(change.X, change.Y, change.Z);
+                oldBlock = state.World.GetBlock(change.X, change.Y, change.Z);
             }
 
             if (oldBlock != BlockId.Air && !BlockRegistry.IsWater(oldBlock) && !BlockRegistry.IsLava(oldBlock))
@@ -571,23 +692,32 @@ internal sealed class NetworkServer
                     change.X + 0.5f,
                     change.Y + 0.5f,
                     change.Z + 0.5f,
-                    (int)oldBlock);
+                    (int)oldBlock,
+                    dimension);
             }
         }
 
-        return _simulation.Enqueue(change);
+        return state.Simulation.Enqueue(change);
     }
 
-    private void SpawnEntity(Minecraft.Shared.Entities.EntityType type, float x, float y, float z, int data)
+    private void SpawnEntity(
+        Minecraft.Shared.Entities.EntityType type,
+        float x,
+        float y,
+        float z,
+        int data,
+        byte world = 0)
     {
         int id;
         lock (_entitiesSync)
         {
             id = _nextEntityId++;
-            _entities.Add(new ServerEntity(id, type, x, y, z, data));
+            _entities.Add(new ServerEntity(id, type, x, y, z, data) { World = world });
         }
 
-        Broadcast(WorldProtocol.CreateEntitySpawn(_netServer, DefaultGroupId, id, type, x, y, z, data));
+        BroadcastToWorld(
+            world,
+            WorldProtocol.CreateEntitySpawn(_netServer, DefaultGroupId, id, type, x, y, z, data));
     }
 
     private void TickEntities()
@@ -601,6 +731,8 @@ internal sealed class NetworkServer
             _spawnTimer = 5f;
             TrySpawnMobs();
         }
+
+        TickPortals(dt);
 
         List<ServerEntity> snapshot;
         lock (_entitiesSync) { snapshot = _entities.ToList(); }
@@ -628,14 +760,15 @@ internal sealed class NetworkServer
 
             ResolvePlayerCollisions(e);
 
+            var entityWorld = GetWorld(e.World);
             int gbx = (int)MathF.Floor(e.X);
             int gby = (int)MathF.Floor(e.Y - 0.5f);
             int gbz = (int)MathF.Floor(e.Z);
 
-            if (gby >= 0 && gby < _world.SizeY && gbx >= 0 && gbx < _world.SizeX && gbz >= 0 && gbz < _world.SizeZ)
+            if (gby >= 0 && gby < entityWorld.World.SizeY && gbx >= 0 && gbx < entityWorld.World.SizeX && gbz >= 0 && gbz < entityWorld.World.SizeZ)
             {
                 BlockId ground;
-                lock (_worldSync) { ground = _world.GetBlock(gbx, gby, gbz); }
+                lock (entityWorld.Sync) { ground = entityWorld.World.GetBlock(gbx, gby, gbz); }
 
                 if (ground != BlockId.Air && !BlockRegistry.IsWater(ground) && !BlockRegistry.IsLava(ground))
                 {
@@ -648,25 +781,35 @@ internal sealed class NetworkServer
             {
                 if (e.Type == Minecraft.Shared.Entities.EntityType.Pig)
                 {
-                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -10);
+                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -10, e.World);
                 }
                 else if (e.Type == Minecraft.Shared.Entities.EntityType.Sheep)
                 {
-                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -11);
-                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -11);
+                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -11, e.World);
+                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -11, e.World);
                 }
                 else if (e.Type == Minecraft.Shared.Entities.EntityType.Cow)
                 {
-                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -12);
-                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -13);
+                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -12, e.World);
+                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -13, e.World);
+                }
+                else if (e.Type == Minecraft.Shared.Entities.EntityType.Ghast)
+                {
+                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -14, e.World);
+                }
+                else if (e.Type == Minecraft.Shared.Entities.EntityType.Pigman)
+                {
+                    SpawnEntity(Minecraft.Shared.Entities.EntityType.Item, e.X, e.Y, e.Z, -15, e.World);
                 }
 
                 toRemove.Add(e.Id);
-                Broadcast(WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, e.Id));
+                BroadcastToWorld(e.World, WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, e.Id));
                 continue;
             }
 
-            Broadcast(WorldProtocol.CreateEntityUpdate(_netServer, DefaultGroupId, e.Id, e.X, e.Y, e.Z, e.Yaw));
+            BroadcastToWorld(
+                e.World,
+                WorldProtocol.CreateEntityUpdate(_netServer, DefaultGroupId, e.Id, e.X, e.Y, e.Z, e.Yaw));
 
             if (e.Type == Minecraft.Shared.Entities.EntityType.Item)
             {
@@ -675,6 +818,11 @@ internal sealed class NetworkServer
                 {
                     foreach (var p in _players)
                     {
+                        if (p.World != e.World)
+                        {
+                            continue;
+                        }
+
                         var pos = p.Player.Position;
                         var dx = pos.XPosition - e.X;
                         var dy = pos.YPosition - e.Y;
@@ -690,7 +838,7 @@ internal sealed class NetworkServer
                 if (picked)
                 {
                     lock (_entitiesSync) { _entities.RemoveAll(x => x.Id == e.Id); }
-                    Broadcast(WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, e.Id));
+                    BroadcastToWorld(e.World, WorldProtocol.CreateEntityRemove(_netServer, DefaultGroupId, e.Id));
                 }
             }
         }
@@ -706,7 +854,8 @@ internal sealed class NetworkServer
                     var b = snapshot[j];
 
                     if (a.Type == Minecraft.Shared.Entities.EntityType.Item ||
-                        b.Type == Minecraft.Shared.Entities.EntityType.Item)
+                        b.Type == Minecraft.Shared.Entities.EntityType.Item ||
+                        a.World != b.World)
                     {
                         continue;
                     }
@@ -757,6 +906,11 @@ internal sealed class NetworkServer
         {
             foreach (var player in _players)
             {
+                if (player.World != entity.World)
+                {
+                    continue;
+                }
+
                 var pos = player.Player.Position;
 
                 if (entity.Y + entityHeight <= pos.YPosition ||
@@ -791,12 +945,27 @@ internal sealed class NetworkServer
 
     private void TrySpawnMobs()
     {
+        TrySpawnOverworldMobs();
+        TrySpawnNetherMobs();
+    }
+
+    private void TrySpawnOverworldMobs()
+    {
+        const byte worldId = (byte)Dimension.Overworld;
+        var state = GetWorld(worldId);
         int mobCount;
-        lock (_entitiesSync) { mobCount = _entities.Count(e => e.Type == Minecraft.Shared.Entities.EntityType.Pig || e.Type == Minecraft.Shared.Entities.EntityType.Sheep); }
+        lock (_entitiesSync)
+        {
+            mobCount = _entities.Count(e => e.World == worldId &&
+                (e.Type == Minecraft.Shared.Entities.EntityType.Pig ||
+                 e.Type == Minecraft.Shared.Entities.EntityType.Sheep ||
+                 e.Type == Minecraft.Shared.Entities.EntityType.Cow));
+        }
+
         if (mobCount >= 20) return;
 
         List<PlayerConnection> players;
-        lock (_playersSync) { players = _players.ToList(); }
+        lock (_playersSync) { players = _players.Where(p => p.World == worldId).ToList(); }
         if (players.Count == 0) return;
 
         var rng = new Random();
@@ -806,42 +975,46 @@ internal sealed class NetworkServer
             var pos = p.Player.Position;
             for (var attempt = 0; attempt < 4; attempt++)
             {
-                var dx = rng.Next(-24, 25);
-                var dz = rng.Next(-24, 25);
-                var x = (int)(pos.XPosition + dx);
-                var z = (int)(pos.ZPosition + dz);
+                var x = (int)(pos.XPosition + rng.Next(-24, 25));
+                var z = (int)(pos.ZPosition + rng.Next(-24, 25));
 
-                if (x < 1 || z < 1 || x >= _world.SizeX - 1 || z >= _world.SizeZ - 1) continue;
+                if (x < 1 || z < 1 || x >= state.World.SizeX - 1 || z >= state.World.SizeZ - 1) continue;
 
-                int y = (int)pos.YPosition;
-                if (y < 1 || y >= _world.SizeY - 1) y = _spawnY;
+                var y = (int)pos.YPosition;
+                if (y < 1 || y >= state.World.SizeY - 1) y = state.SpawnY;
 
                 for (var yy = y; yy > 1; yy--)
                 {
                     BlockId below;
-                    lock (_worldSync) { below = _world.GetBlock(x, yy - 1, z); }
+                    lock (state.Sync) { below = state.World.GetBlock(x, yy - 1, z); }
                     if (below == BlockId.Grass || below == BlockId.Dirt || below == BlockId.Sand)
                     {
                         y = yy;
                         break;
                     }
+
                     if (below == BlockId.Air) continue;
                     break;
                 }
 
-                BlockId ground;
-                lock (_worldSync) { ground = _world.GetBlock(x, y - 1, z); }
-                if (ground != BlockId.Grass && ground != BlockId.Dirt) continue;
+                BlockId ground, space;
+                lock (state.Sync)
+                {
+                    ground = state.World.GetBlock(x, y - 1, z);
+                    space = state.World.GetBlock(x, y, z);
+                }
 
-                BlockId space;
-                lock (_worldSync) { space = _world.GetBlock(x, y, z); }
+                if (ground != BlockId.Grass && ground != BlockId.Dirt) continue;
                 if (space != BlockId.Air) continue;
 
-                var type = rng.Next(2) == 0
+                var roll = rng.Next(3);
+                var type = roll == 0
                     ? Minecraft.Shared.Entities.EntityType.Pig
-                    : Minecraft.Shared.Entities.EntityType.Sheep;
+                    : roll == 1
+                        ? Minecraft.Shared.Entities.EntityType.Sheep
+                        : Minecraft.Shared.Entities.EntityType.Cow;
 
-                SpawnEntity(type, x + 0.5f, y + 0.5f, z + 0.5f, 0);
+                SpawnEntity(type, x + 0.5f, y + 0.5f, z + 0.5f, 0, worldId);
                 mobCount++;
                 if (mobCount >= 20) return;
                 break;
@@ -849,29 +1022,154 @@ internal sealed class NetworkServer
         }
     }
 
-    private void BroadcastBlockChange(BlockChange change)
+    private void TickPortals(float dt)
+    {
+        List<PlayerConnection> players;
+        lock (_playersSync) { players = _players.ToList(); }
+
+        foreach (var player in players)
+        {
+            player.PortalCooldown = Math.Max(0, player.PortalCooldown - dt);
+            if (player.PortalCooldown > 0)
+            {
+                continue;
+            }
+
+            var state = GetWorld(player.World);
+            var pos = player.Player.Position;
+            var bx = (int)MathF.Floor(pos.XPosition);
+            var by = (int)MathF.Floor(pos.YPosition);
+            var bz = (int)MathF.Floor(pos.ZPosition);
+
+            bool inPortal;
+            lock (state.Sync)
+            {
+                inPortal = state.World.InBounds(bx, by, bz) &&
+                           state.World.GetBlock(bx, by, bz) == BlockId.NetherPortal;
+            }
+
+            if (!inPortal)
+            {
+                continue;
+            }
+
+            var destination = player.World == (byte)Dimension.Overworld ? (byte)Dimension.Nether : (byte)Dimension.Overworld;
+
+            Position? joinPosition = null;
+            if (destination == (byte)Dimension.Nether)
+            {
+                player.OverworldReturn = new Position(
+                    player.Player.Position.XPosition,
+                    player.Player.Position.YPosition,
+                    player.Player.Position.ZPosition,
+                    player.Player.Position.Yaw,
+                    player.Player.Position.Pitch);
+            }
+            else if (player.OverworldReturn is not null)
+            {
+                joinPosition = player.OverworldReturn;
+            }
+
+            player.World = destination;
+            player.Player.World = destination;
+            player.PortalCooldown = 4f;
+            QueueWorld(player.Connection, player.GroupId, destination, player.Player, joinPosition);
+            Broadcast(CreatePlayerListMessage(DefaultGroupId));
+
+            var destName = destination == (byte)Dimension.Nether ? "the Nether" : "the Overworld";
+            _log($"{player.Player.Username} entered {destName}.");
+        }
+    }
+
+    private void TrySpawnNetherMobs()
+    {
+        const byte worldId = (byte)Dimension.Nether;
+        var state = GetWorld(worldId);
+        int mobCount;
+        lock (_entitiesSync)
+        {
+            mobCount = _entities.Count(e => e.World == worldId &&
+                (e.Type == Minecraft.Shared.Entities.EntityType.Ghast ||
+                 e.Type == Minecraft.Shared.Entities.EntityType.Pigman));
+        }
+
+        if (mobCount >= 10) return;
+
+        List<PlayerConnection> players;
+        lock (_playersSync) { players = _players.Where(p => p.World == worldId).ToList(); }
+        if (players.Count == 0) return;
+
+        var rng = new Random();
+
+        foreach (var p in players)
+        {
+            var pos = p.Player.Position;
+            for (var attempt = 0; attempt < 4; attempt++)
+            {
+                var x = (int)(pos.XPosition + rng.Next(-24, 25));
+                var z = (int)(pos.ZPosition + rng.Next(-24, 25));
+                var y = Math.Clamp((int)(pos.YPosition + rng.Next(-8, 9)), 5, state.World.SizeY - 6);
+
+                if (x < 1 || z < 1 || x >= state.World.SizeX - 1 || z >= state.World.SizeZ - 1) continue;
+
+                var type = rng.Next(3) == 0
+                    ? Minecraft.Shared.Entities.EntityType.Ghast
+                    : Minecraft.Shared.Entities.EntityType.Pigman;
+
+                bool canSpawn;
+                lock (state.Sync)
+                {
+                    if (type == Minecraft.Shared.Entities.EntityType.Ghast)
+                    {
+                        canSpawn = state.World.GetBlock(x, y, z) == BlockId.Air &&
+                                   state.World.GetBlock(x, y + 1, z) == BlockId.Air &&
+                                   state.World.GetBlock(x, y + 2, z) == BlockId.Air &&
+                                   state.World.GetBlock(x, y + 3, z) == BlockId.Air;
+                    }
+                    else
+                    {
+                        var ground = state.World.GetBlock(x, y - 1, z);
+                        canSpawn = (ground == BlockId.Netherrack || ground == BlockId.SoulSand) &&
+                                   state.World.GetBlock(x, y, z) == BlockId.Air &&
+                                   state.World.GetBlock(x, y + 1, z) == BlockId.Air;
+                    }
+                }
+
+                if (!canSpawn) continue;
+
+                SpawnEntity(type, x + 0.5f, y + 0.5f, z + 0.5f, 0, worldId);
+                mobCount++;
+                if (mobCount >= 10) return;
+                break;
+            }
+        }
+    }
+
+    private void BroadcastBlockChange(byte world, BlockChange change)
     {
         if (_netServer is null || _netServer.Status != NetPeerStatus.Running)
         {
             return;
         }
 
-        Broadcast(CreateBlockUpdateMessage(DefaultGroupId, change));
+        BroadcastToWorld(world, CreateBlockUpdateMessage(DefaultGroupId, change with { World = world }));
     }
 
-    public BlockId GetBlock(int x, int y, int z)
+    public BlockId GetBlock(int x, int y, int z, byte world = 0)
     {
-        lock (_worldSync)
+        var state = GetWorld(world);
+        lock (state.Sync)
         {
-            return _world.GetBlock(x, y, z);
+            return state.World.GetBlock(x, y, z);
         }
     }
 
-    public IReadOnlyDictionary<BlockId, int> CountBlocks()
+    public IReadOnlyDictionary<BlockId, int> CountBlocks(byte world = 0)
     {
-        lock (_worldSync)
+        var state = GetWorld(world);
+        lock (state.Sync)
         {
-            return _world.CountBlocks();
+            return state.World.CountBlocks();
         }
     }
 
@@ -892,7 +1190,7 @@ internal sealed class NetworkServer
         player.Connection.Disconnect("You were kicked from the server.");
     }
 
-    private readonly record struct ChunkRequest(string GroupId, int ChunkX, int ChunkZ);
+    private readonly record struct ChunkRequest(string GroupId, int ChunkX, int ChunkZ, byte World = 0);
 
     private static bool IsValidUsername(string username)
     {

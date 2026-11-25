@@ -5,9 +5,9 @@ using Minecraft.Shared.Worlds;
 namespace Minecraft.Shared.Net;
 
 /// <summary>A single block edit sent over the Lidgren packet stream.</summary>
-public readonly record struct BlockChange(int X, int Y, int Z, BlockId Block);
+public readonly record struct BlockChange(int X, int Y, int Z, BlockId Block, byte World = 0);
 
-/// <summary>The dimensions and spawn point of the server's world.</summary>
+/// <summary>The dimensions and spawn point of a server world.</summary>
 public readonly record struct WorldInfo(
     int SizeX,
     int SizeY,
@@ -15,10 +15,11 @@ public readonly record struct WorldInfo(
     int Seed,
     int SpawnX,
     int SpawnY,
-    int SpawnZ);
+    int SpawnZ,
+    byte World = 0);
 
 /// <summary>One 16x16 column of blocks. Blocks are indexed x, z, y.</summary>
-public readonly record struct ChunkSnapshot(int ChunkX, int ChunkZ, BlockId[] Blocks);
+public readonly record struct ChunkSnapshot(int ChunkX, int ChunkZ, BlockId[] Blocks, byte World = 0);
 
 /// <summary>
 /// World packets carried by the upstream-style Lidgren transport. Every packet
@@ -40,7 +41,7 @@ public static class WorldProtocol
         string groupId,
         WorldInfo info)
     {
-        var message = peer.CreateMessage(48 + groupId.Length);
+        var message = peer.CreateMessage(49 + groupId.Length);
 
         message.Write((byte)PacketType.WorldInfo);
         message.Write(groupId);
@@ -51,6 +52,7 @@ public static class WorldProtocol
         message.Write(info.SpawnX);
         message.Write(info.SpawnY);
         message.Write(info.SpawnZ);
+        message.Write(info.World);
         return message;
     }
 
@@ -64,7 +66,8 @@ public static class WorldProtocol
             message.ReadInt32(),
             message.ReadInt32(),
             message.ReadInt32(),
-            message.ReadInt32());
+            message.ReadInt32(),
+            message.ReadByte());
     }
 
     public static NetOutgoingMessage CreateChunkSnapshot(
@@ -72,7 +75,8 @@ public static class WorldProtocol
         string groupId,
         World world,
         int chunkX,
-        int chunkZ)
+        int chunkZ,
+        byte dimension = 0)
     {
         var blocks = ReadChunkBlocks(world, chunkX, chunkZ);
         var runs = CountRuns(blocks);
@@ -86,6 +90,7 @@ public static class WorldProtocol
         message.Write(groupId);
         message.Write(chunkX);
         message.Write(chunkZ);
+        message.Write(dimension);
         message.Write(useRle ? ChunkEncodingRle : ChunkEncodingRaw);
         message.Write(blocks.Length);
 
@@ -128,6 +133,7 @@ public static class WorldProtocol
     {
         var chunkX = message.ReadInt32();
         var chunkZ = message.ReadInt32();
+        var dimension = message.ReadByte();
         var encoding = message.ReadByte();
         var count = message.ReadInt32();
         var expected = ChunkSize * ChunkSize * worldHeight;
@@ -173,7 +179,7 @@ public static class WorldProtocol
             throw new NetException($"Unknown chunk encoding {encoding}.");
         }
 
-        return new ChunkSnapshot(chunkX, chunkZ, blocks);
+        return new ChunkSnapshot(chunkX, chunkZ, blocks, dimension);
     }
 
     public static NetOutgoingMessage CreateBlockUpdate(
@@ -182,9 +188,10 @@ public static class WorldProtocol
         int x,
         int y,
         int z,
-        BlockId block)
+        BlockId block,
+        byte dimension = 0)
     {
-        var message = peer.CreateMessage(17 + groupId.Length);
+        var message = peer.CreateMessage(18 + groupId.Length);
 
         message.Write((byte)PacketType.BlockUpdate);
         message.Write(groupId);
@@ -192,6 +199,7 @@ public static class WorldProtocol
         message.Write(y);
         message.Write(z);
         message.Write((ushort)block);
+        message.Write(dimension);
         return message;
     }
 
@@ -202,7 +210,8 @@ public static class WorldProtocol
             message.ReadInt32(),
             message.ReadInt32(),
             message.ReadInt32(),
-            (BlockId)message.ReadUInt16());
+            (BlockId)message.ReadUInt16(),
+            message.ReadByte());
     }
 
     private static BlockId[] ReadChunkBlocks(World world, int chunkX, int chunkZ)

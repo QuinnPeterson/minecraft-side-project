@@ -19,6 +19,8 @@ internal sealed class PlayerPositionPacket : IPacket
         }
 
         server.UpdatePlayerPosition(player, position);
-        server.Broadcast(server.CreatePlayerPositionMessage(groupId, player.Player));
+        server.BroadcastToWorld(
+            player.World,
+            server.CreatePlayerPositionMessage(groupId, player.Player));
     }
 }

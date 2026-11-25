@@ -20,7 +20,8 @@ internal sealed class InputPacket : IPacket
         }
 
         server.UpdatePlayerPosition(player, position);
-        server.Broadcast(
+        server.BroadcastToWorld(
+            player.World,
             server.CreatePlayerPositionMessage(groupId, player.Player),
             NetDeliveryMethod.UnreliableSequenced);
     }

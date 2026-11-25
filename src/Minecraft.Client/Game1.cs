@@ -49,6 +49,8 @@ public class Game1 : Game
     private const int HotbarSlots = 9;
     private const int ItemEmptyBucket = -1;
     private const int ItemWaterBucket = -2;
+    private const int ItemFlintSteel = -3;
+    private static readonly int[] CreativeExtraItems = { ItemFlintSteel, ItemEmptyBucket, ItemWaterBucket };
     private const int HotbarCell = 46;
     private const int InventoryColumns = 9;
     private const int InventoryCell = 48;
@@ -150,11 +152,12 @@ public class Game1 : Game
         (int)BlockId.Wood,
         (int)BlockId.Leaves,
         (int)BlockId.Sand,
-        ItemEmptyBucket,
+        ItemFlintSteel,
     };
 
     private World _world = new(16, World.DefaultHeight, 16);
     private WorldInfo? _worldInfo;
+    private byte _dimension;
     private bool _hasSpawn;
     private Vector3 _spawnPoint;
 
@@ -448,7 +451,10 @@ public class Game1 : Game
 
         if (_state == GameState.Playing)
         {
-            BlockAtlas.UpdateWaterAnimation(_atlasTexture, (float)gameTime.TotalGameTime.TotalSeconds);
+            var t = (float)gameTime.TotalGameTime.TotalSeconds;
+            BlockAtlas.UpdateWaterAnimation(_atlasTexture, t);
+            BlockAtlas.UpdateFireAnimation(_atlasTexture, t);
+            BlockAtlas.UpdatePortalAnimation(_atlasTexture, t);
         }
 
         base.Update(gameTime);
@@ -528,8 +534,13 @@ public class Game1 : Game
             0.1f,
             220f);
 
+        var inNether = _dimension == (byte)Dimension.Nether;
         var underwater = IsEyeInWater();
-        var fogColor = underwater ? UnderwaterColor : SkyColor;
+        var fogColor = underwater
+            ? UnderwaterColor
+            : inNether
+                ? new Color(90, 18, 12)
+                : SkyColor;
 
         GraphicsDevice.Clear(fogColor);
         GraphicsDevice.SamplerStates[0] = SamplerState.PointClamp;
@@ -541,8 +552,8 @@ public class Game1 : Game
         _texturedEffect.Projection = projection;
         _texturedEffect.World = Matrix.Identity;
         _texturedEffect.FogColor = fogColor.ToVector3();
-        _texturedEffect.FogStart = underwater ? 1f : 90f;
-        _texturedEffect.FogEnd = underwater ? 20f : 200f;
+        _texturedEffect.FogStart = underwater ? 1f : inNether ? 20f : 90f;
+        _texturedEffect.FogEnd = underwater ? 20f : inNether ? 110f : 200f;
 
         _colorEffect.View = view;
         _colorEffect.Projection = projection;
@@ -559,11 +570,14 @@ public class Game1 : Game
         DrawRemotePlayers();
         DrawEntities();
 
-        // Cloud plane: translucent, depth-tested, but never writes depth.
-        GraphicsDevice.BlendState = BlendState.AlphaBlend;
-        GraphicsDevice.DepthStencilState = DepthStencilState.DepthRead;
-        var cloudOffset = (float)(gameTime.TotalGameTime.TotalSeconds * 1.5 % 512.0);
-        _clouds.Draw(GraphicsDevice, _texturedEffect, cloudOffset);
+        if (_dimension != (byte)Dimension.Nether)
+        {
+            // Cloud plane: translucent, depth-tested, but never writes depth.
+            GraphicsDevice.BlendState = BlendState.AlphaBlend;
+            GraphicsDevice.DepthStencilState = DepthStencilState.DepthRead;
+            var cloudOffset = (float)(gameTime.TotalGameTime.TotalSeconds * 1.5 % 512.0);
+            _clouds.Draw(GraphicsDevice, _texturedEffect, cloudOffset);
+        }
 
         // Transparent world, far chunks first so water blends over distant water.
         GraphicsDevice.BlendState = BlendState.AlphaBlend;
@@ -678,6 +692,11 @@ public class Game1 : Game
     /// </summary>
     private void DrawDayNightSky(Matrix view, Matrix projection, Vector3 cameraForward)
     {
+        if (_dimension == (byte)Dimension.Nether)
+        {
+            return;
+        }
+
         var viewport = GraphicsDevice.Viewport;
         var width = viewport.Width;
         var height = viewport.Height;
@@ -1702,6 +1721,16 @@ public class Game1 : Game
             return;
         }
 
+        if (selected == ItemFlintSteel)
+        {
+            if (BlockRegistry.IsReplaceable(existing))
+            {
+                _network.SendBlockChange(placeX, placeY, placeZ, BlockId.Fire);
+            }
+
+            return;
+        }
+
         if (selected < 0)
         {
             return;
@@ -1840,6 +1869,11 @@ public class Game1 : Game
             return "Water Bucket";
         }
 
+        if (slot == ItemFlintSteel)
+        {
+            return "Flint and Steel";
+        }
+
         if (slot < 0)
         {
             // Mob drops and other item entities arrive here as negative ids.
@@ -1849,6 +1883,8 @@ public class Game1 : Game
                 -11 => "Wool",
                 -12 => "Beef",
                 -13 => "Leather",
+                -14 => "Ghast Tear",
+                -15 => "Gold Nugget",
                 _ => $"Item {Math.Abs(slot)}",
             };
         }
@@ -1895,6 +1931,11 @@ public class Game1 : Game
         while (_network.PlayerLists.TryDequeue(out var players))
         {
             SyncRemotePlayers(players);
+        }
+
+        while (_network.PlayerUpdates.TryDequeue(out var playerUpdate))
+        {
+            ApplyRemotePlayerUpdate(playerUpdate);
         }
 
         while (_network.EntitySpawns.TryDequeue(out var snap))
@@ -1963,12 +2004,24 @@ public class Game1 : Game
     private void InitializeWorld(WorldInfo info)
     {
         _worldInfo = info;
+        _dimension = info.World;
         _world = new World(info.SizeX, info.SizeY, info.SizeZ);
         _spawnPoint = new Vector3(info.SpawnX + 0.5f, info.SpawnY, info.SpawnZ + 0.5f);
         _position = _spawnPoint;
         _velocity = Vector3.Zero;
         _hasSpawn = true;
         _onGround = false;
+        _flying = false;
+        _wasOnGround = false;
+        _fallStartY = _position.Y;
+        _breakProgress = 0f;
+        _breakCooldown = 0f;
+        _crackStage = -1;
+        _hasTarget = false;
+        _localDropTime = -1;
+        _pendingPickups.Clear();
+        _entities.Clear();
+        ClearRemotePlayers();
 
         ClearChunkMeshes();
         _loadedChunks.Clear();
@@ -1976,7 +2029,10 @@ public class Game1 : Game
         _lighting = new LightingEngine(_world);
         _worldReady = false;
         _worldStartTime = _networkTime;
-        Window.Title = $"Minecraft Client - world {info.SizeX}x{info.SizeY}x{info.SizeZ} (seed {info.Seed})";
+        _network.ClearWorldQueues();
+
+        var worldName = _dimension == (byte)Dimension.Nether ? "Nether" : "Overworld";
+        Window.Title = $"Minecraft Client - {worldName} {info.SizeX}x{info.SizeY}x{info.SizeZ} (seed {info.Seed})";
     }
 
     /// <summary>
@@ -1996,7 +2052,8 @@ public class Game1 : Game
                 return;
             }
 
-            _lighting.Initialize((float)_timeOfDay);
+            var lightingTime = _dimension == (byte)Dimension.Nether ? 0f : (float)_timeOfDay;
+            _lighting.Initialize(lightingTime);
             _worldReady = true;
 
             foreach (var key in _loadedChunks)
@@ -2011,7 +2068,8 @@ public class Game1 : Game
         // Recompute once per in-game hour so the frame loop stays cheap.
         if (Math.Floor(_timeOfDay) != _lastLightingHour)
         {
-            _lighting.Compute((float)_timeOfDay);
+            var lightingTime = _dimension == (byte)Dimension.Nether ? 0f : (float)_timeOfDay;
+            _lighting.Compute(lightingTime);
             _lastLightingHour = Math.Floor(_timeOfDay);
 
             foreach (var key in _loadedChunks)
@@ -2023,6 +2081,11 @@ public class Game1 : Game
 
     private void ApplyChunk(ChunkSnapshot chunk)
     {
+        if (chunk.World != _dimension)
+        {
+            return;
+        }
+
         var expected = ChunkSize * ChunkSize * _world.SizeY;
 
         if (chunk.Blocks.Length != expected)
@@ -2052,6 +2115,11 @@ public class Game1 : Game
 
     private void ApplyBlockChange(BlockChange change)
     {
+        if (change.World != _dimension)
+        {
+            return;
+        }
+
         if (!_world.InBounds(change.X, change.Y, change.Z))
         {
             return;
@@ -2165,6 +2233,11 @@ public class Game1 : Game
 
         foreach (var player in players)
         {
+            if (player.World != _dimension)
+            {
+                continue;
+            }
+
             seen.Add(player.Username);
             ApplyRemotePlayerUpdate(player);
         }
@@ -2182,6 +2255,13 @@ public class Game1 : Game
     {
         if (string.Equals(player.Username, _network.Username, StringComparison.OrdinalIgnoreCase))
         {
+            return;
+        }
+
+        if (player.World != _dimension)
+        {
+            _visuals.Remove(player.Username, out var stale);
+            stale?.Dispose();
             return;
         }
 
@@ -2482,6 +2562,25 @@ public class Game1 : Game
                 AddBox(pos, new Vector3(-0.4f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40), Matrix.Identity);
                 AddBox(pos, new Vector3(0.28f, 0f, 0.13f), new Vector3(0.12f, 0.5f, 0.12f), new Color(80, 60, 40), Matrix.Identity);
             }
+            else if (e.Type == EntityType.Ghast)
+            {
+                // Large floating white body with hanging tentacles.
+                AddBox(pos, new Vector3(-1.2f, 1.2f, -1.2f), new Vector3(2.4f, 2.4f, 2.4f), new Color(235, 235, 235), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.35f, 0.4f, -0.35f), new Vector3(0.2f, 0.8f, 0.2f), new Color(220, 220, 220), Matrix.Identity);
+                AddBox(pos, new Vector3(0.15f, 0.2f, -0.35f), new Vector3(0.2f, 1.0f, 0.2f), new Color(220, 220, 220), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.35f, 0.3f, 0.15f), new Vector3(0.2f, 0.9f, 0.2f), new Color(220, 220, 220), Matrix.Identity);
+                AddBox(pos, new Vector3(0.15f, 0.5f, 0.15f), new Vector3(0.2f, 0.7f, 0.2f), new Color(220, 220, 220), Matrix.Identity);
+            }
+            else if (e.Type == EntityType.Pigman)
+            {
+                // Simple humanoid zombie pigman.
+                AddBox(pos, new Vector3(-0.25f, 0.75f, -0.15f), new Vector3(0.5f, 0.75f, 0.3f), new Color(150, 110, 90), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.2f, 1.5f, -0.2f), new Vector3(0.4f, 0.4f, 0.4f), new Color(180, 130, 110), Matrix.CreateRotationY(e.HeadYaw));
+                AddBox(pos, new Vector3(-0.45f, 0.8f, -0.1f), new Vector3(0.2f, 0.7f, 0.2f), new Color(140, 100, 80), Matrix.Identity);
+                AddBox(pos, new Vector3(0.25f, 0.8f, -0.1f), new Vector3(0.2f, 0.7f, 0.2f), new Color(140, 100, 80), Matrix.Identity);
+                AddBox(pos, new Vector3(-0.2f, 0f, -0.1f), new Vector3(0.18f, 0.75f, 0.2f), new Color(110, 80, 70), Matrix.Identity);
+                AddBox(pos, new Vector3(0.02f, 0f, -0.1f), new Vector3(0.18f, 0.75f, 0.2f), new Color(110, 80, 70), Matrix.Identity);
+            }
             else // Item
             {
                 AddBox(pos, new Vector3(-0.15f, 0f, -0.15f), new Vector3(0.3f, 0.3f, 0.3f), Color.White, Matrix.Identity);
@@ -2503,8 +2602,11 @@ public class Game1 : Game
             {
                 // Red flash overlay.
                 var he = new VertexPositionColor[24];
-                var hb = new Vector3(pos.X - 0.6f, pos.Y, pos.Z - 0.5f);
-                var hs = new Vector3(1.2f, 1.2f, 1.0f);
+                var (hb, hs) = e.Type == EntityType.Ghast
+                    ? (new Vector3(pos.X - 1.3f, pos.Y + 0.2f, pos.Z - 1.3f), new Vector3(2.6f, 3.4f, 2.6f))
+                    : e.Type == EntityType.Item
+                        ? (new Vector3(pos.X - 0.2f, pos.Y, pos.Z - 0.2f), new Vector3(0.4f, 0.4f, 0.4f))
+                        : (new Vector3(pos.X - 0.6f, pos.Y, pos.Z - 0.5f), new Vector3(1.2f, 1.2f, 1.0f));
                 var hc = new[]
                 {
                     new Vector3(0,0,0), new Vector3(hs.X,0,0), new Vector3(hs.X,0,hs.Z), new Vector3(0,0,hs.Z),
@@ -2752,7 +2854,8 @@ public class Game1 : Game
         }
 
         var palette = BlockRegistry.CreativePalette;
-        var rows = (palette.Count + InventoryColumns - 1) / InventoryColumns;
+        var totalCount = palette.Count + CreativeExtraItems.Length;
+        var rows = (totalCount + InventoryColumns - 1) / InventoryColumns;
         var padding = 16;
         var header = 84;
         var panelWidth = InventoryColumns * InventoryCell + padding * 2;
@@ -2776,7 +2879,7 @@ public class Game1 : Game
             $"Slot {_selectedSlot + 1}  |  Click a block, E or Esc to close",
             new Vector2(panel.X + padding, panel.Y + 34f));
 
-        for (var i = 0; i < palette.Count; i++)
+        for (var i = 0; i < totalCount; i++)
         {
             var column = i % InventoryColumns;
             var row = i / InventoryColumns;
@@ -2785,7 +2888,8 @@ public class Game1 : Game
             var cell = new Rectangle(x + 3, y + 3, InventoryCell - 6, InventoryCell - 6);
 
             _spriteBatch.Draw(_pixel, cell, new Color(52, 52, 60, 230));
-            DrawBlockIcon((int)palette[i].Id, new Rectangle(x + 8, y + 8, InventoryCell - 16, InventoryCell - 16));
+            var itemId = i < palette.Count ? (int)palette[i].Id : CreativeExtraItems[i - palette.Count];
+            DrawBlockIcon(itemId, new Rectangle(x + 8, y + 8, InventoryCell - 16, InventoryCell - 16));
         }
     }
 
@@ -2836,6 +2940,12 @@ public class Game1 : Game
         if (slot == ItemWaterBucket)
         {
             DrawItemIcon("W", destination, new Color(63, 118, 228));
+            return;
+        }
+
+        if (slot == ItemFlintSteel)
+        {
+            DrawItemIcon("F", destination, new Color(210, 120, 40));
             return;
         }
 
@@ -2987,7 +3097,8 @@ public class Game1 : Game
 
         var viewport = GraphicsDevice.Viewport;
         var palette = BlockRegistry.CreativePalette;
-        var rows = (palette.Count + InventoryColumns - 1) / InventoryColumns;
+        var totalCount = palette.Count + CreativeExtraItems.Length;
+        var rows = (totalCount + InventoryColumns - 1) / InventoryColumns;
         var padding = 16;
         var header = 84;
         var panelWidth = InventoryColumns * InventoryCell + padding * 2;
@@ -3012,13 +3123,23 @@ public class Game1 : Game
         var row = localY / InventoryCell;
         var index = row * InventoryColumns + column;
 
-        if (index < 0 || index >= palette.Count)
+        if (index < 0 || index >= totalCount)
         {
             return;
         }
 
-        _hotbar[_selectedSlot] = (int)palette[index].Id;
-        ShowToast(palette[index].Name);
+        if (index < palette.Count)
+        {
+            _hotbar[_selectedSlot] = (int)palette[index].Id;
+            ShowToast(palette[index].Name);
+        }
+        else
+        {
+            var itemId = CreativeExtraItems[index - palette.Count];
+            _hotbar[_selectedSlot] = itemId;
+            ShowToast(ItemName(itemId));
+        }
+
         SetInventoryOpen(false);
     }
 

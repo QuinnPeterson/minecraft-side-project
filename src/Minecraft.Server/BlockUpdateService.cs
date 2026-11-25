@@ -153,6 +153,11 @@ public sealed class BlockUpdateService : IDisposable
                 {
                     changes.Add(change);
                     Activate(change.X, change.Y, change.Z);
+
+                    if (change.Block == BlockId.Fire)
+                    {
+                        TryIgnitePortal(changes, change.X, change.Y, change.Z);
+                    }
                 }
             }
         }
@@ -745,6 +750,104 @@ public sealed class BlockUpdateService : IDisposable
         public Coordinates3D TargetBlock;
         public byte Level;
         public bool Water;
+    }
+
+    private void TryIgnitePortal(List<BlockChange> changes, int x, int y, int z)
+    {
+        TryIgnitePortalFrame(changes, x, y, z, alongX: true);
+        TryIgnitePortalFrame(changes, x, y, z, alongX: false);
+    }
+
+    private void TryIgnitePortalFrame(List<BlockChange> changes, int x, int y, int z, bool alongX)
+    {
+        var minOffset = 0;
+        while (true)
+        {
+            var nx = alongX ? x + minOffset - 1 : x;
+            var nz = alongX ? z : z + minOffset - 1;
+            if (!_world.InBounds(nx, y, nz) || !IsPortalInterior(_world.GetBlock(nx, y, nz))) break;
+            minOffset--;
+            if (minOffset < -3) return;
+        }
+
+        var baseX = alongX ? x + minOffset : x;
+        var baseZ = alongX ? z : z + minOffset;
+        var baseY = y;
+        while (baseY > 0 && _world.InBounds(baseX, baseY - 1, baseZ) &&
+               IsPortalInterior(_world.GetBlock(baseX, baseY - 1, baseZ)))
+        {
+            baseY--;
+        }
+
+        for (var width = 2; width <= 3; width++)
+        {
+            for (var height = 3; height <= 4; height++)
+            {
+                if (IsValidPortalFrame(baseX, baseY, baseZ, width, height, alongX))
+                {
+                    FillPortalFrame(changes, baseX, baseY, baseZ, width, height, alongX);
+                    return;
+                }
+            }
+        }
+    }
+
+    private bool IsPortalInterior(BlockId block) =>
+        block == BlockId.Air || block == BlockId.Fire || block == BlockId.NetherPortal;
+
+    private bool IsValidPortalFrame(int x, int y, int z, int width, int height, bool alongX)
+    {
+        var hasFire = false;
+
+        for (var dx = -1; dx <= width; dx++)
+        {
+            for (var dy = -1; dy <= height; dy++)
+            {
+                var px = alongX ? x + dx : x;
+                var py = y + dy;
+                var pz = alongX ? z : z + dx;
+
+                if (!_world.InBounds(px, py, pz)) return false;
+
+                var frame = dx == -1 || dx == width || dy == -1 || dy == height;
+                var block = _world.GetBlock(px, py, pz);
+                if (frame)
+                {
+                    if (block != BlockId.Obsidian) return false;
+                }
+                else
+                {
+                    if (!IsPortalInterior(block)) return false;
+                    if (block == BlockId.Fire) hasFire = true;
+                }
+            }
+        }
+
+        return hasFire;
+    }
+
+    private void FillPortalFrame(List<BlockChange> changes, int x, int y, int z, int width, int height, bool alongX)
+    {
+        for (var dx = 0; dx < width; dx++)
+        {
+            for (var dy = 0; dy < height; dy++)
+            {
+                var px = alongX ? x + dx : x;
+                var py = y + dy;
+                var pz = alongX ? z : z + dx;
+
+                if (_world.GetBlock(px, py, pz) == BlockId.NetherPortal)
+                {
+                    continue;
+                }
+
+                if (_world.SetBlock(px, py, pz, BlockId.NetherPortal))
+                {
+                    changes.Add(new BlockChange(px, py, pz, BlockId.NetherPortal));
+                    ActivateNeighbors(px, py, pz);
+                }
+            }
+        }
     }
 
     private struct Coordinates3D

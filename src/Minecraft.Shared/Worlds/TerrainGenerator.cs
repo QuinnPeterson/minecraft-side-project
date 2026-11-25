@@ -472,4 +472,192 @@ public static class TerrainGenerator
     }
 
     private static float Lerp(float a, float b, float t) => a + (b - a) * t;
+
+    /// <summary>
+    /// A separate nether dimension: a roofed netherrack cavern with lava seas,
+    /// soul sand, glowstone pockets, and a return portal at the spawn point.
+    /// </summary>
+    public static TerrainGenerationResult GenerateNether(
+        int sizeX,
+        int sizeZ,
+        int height = World.DefaultHeight,
+        int seed = 0)
+    {
+        if (seed == 0)
+        {
+            seed = Environment.TickCount;
+        }
+
+        var world = new World(sizeX, height, sizeZ);
+        var random = new Random(seed ^ 0x4E455448);
+        var caves = new PerlinNoise(seed + 777);
+        var detail = new PerlinNoise(seed + 878);
+        var patches = new PerlinNoise(seed + 979);
+        const int lavaSeaLevel = 31;
+
+        for (var x = 0; x < sizeX; x++)
+        {
+            for (var z = 0; z < sizeZ; z++)
+            {
+                for (var y = 0; y < height; y++)
+                {
+                    if (y == 0 || y == height - 1)
+                    {
+                        world.SetBlock(x, y, z, BlockId.Bedrock);
+                        continue;
+                    }
+
+                    // Two overlapping noise fields make big open caverns while keeping
+                    // some netherrack pillars/walls for a Minecraft-like nether feel.
+                    var cavern = caves.Fbm3D(x * 0.035f, y * 0.045f, z * 0.035f, 3);
+                    var tunnel = detail.Fbm3D(x * 0.06f, y * 0.08f, z * 0.06f, 2);
+                    var open = cavern > 0.08f || tunnel > 0.32f;
+
+                    // Keep a rough floor/ceiling shell so the nether isn't a void.
+                    var edgeDistance = Math.Min(y - 1, height - 2 - y);
+                    if (edgeDistance < 6)
+                    {
+                        open &= random.NextDouble() < edgeDistance / 8.0;
+                    }
+
+                    if (open)
+                    {
+                        if (y <= lavaSeaLevel)
+                        {
+                            world.SetBlock(x, y, z, BlockId.Lava);
+                        }
+
+                        continue;
+                    }
+
+                    var block = BlockId.Netherrack;
+
+                    // Gravel and soulsand pockets give surface variety.
+                    var patch = patches.Fbm3D(x * 0.09f, y * 0.09f, z * 0.09f, 2);
+                    if (patch > 0.45f)
+                    {
+                        block = BlockId.Gravel;
+                    }
+                    else if (patch < -0.42f && y < 70)
+                    {
+                        block = BlockId.SoulSand;
+                    }
+
+                    // Glowstone clusters near ceilings and in pockets.
+                    if (random.NextDouble() < 0.004 && y > 40)
+                    {
+                        block = BlockId.Glowstone;
+                    }
+
+                    world.SetBlock(x, y, z, block);
+                }
+            }
+        }
+
+        // Second pass: lava lakes, surface patches, and fire.
+        for (var x = 1; x < sizeX - 1; x++)
+        {
+            for (var z = 1; z < sizeZ - 1; z++)
+            {
+                var lakeNoise = detail.Fbm2D(x * 0.03f, z * 0.03f, 3);
+                var lakeCenter = lakeNoise > 0.55f;
+
+                for (var y = height - 3; y > 1; y--)
+                {
+                    var block = world.GetBlock(x, y, z);
+                    if (block == BlockId.Air || block == BlockId.Fire || BlockRegistry.IsLava(block))
+                    {
+                        continue;
+                    }
+
+                    var above = world.GetBlock(x, y + 1, z);
+                    var aboveAir = above == BlockId.Air || above == BlockId.Fire;
+                    var surface = aboveAir;
+
+                    // Carve shallow lava lakes into open ground.
+                    if (lakeCenter && surface && y <= lavaSeaLevel + 2 && y >= lavaSeaLevel - 6)
+                    {
+                        for (var dy = 0; dy >= -2; dy--)
+                        {
+                            var yy = y + dy;
+                            if (yy <= 1) break;
+                            var current = world.GetBlock(x, yy, z);
+                            if (current == BlockId.Netherrack || current == BlockId.Gravel || current == BlockId.SoulSand)
+                            {
+                                world.SetBlock(x, yy, z, yy <= lavaSeaLevel ? BlockId.Lava : BlockId.Air);
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    if (!surface)
+                    {
+                        continue;
+                    }
+
+                    // Soul sand / gravel patches on exposed floors.
+                    var surfacePatch = patches.Fbm2D(x * 0.08f, z * 0.08f, 2);
+                    if (surfacePatch > 0.5f && block == BlockId.Netherrack)
+                    {
+                        world.SetBlock(x, y, z, BlockId.Gravel);
+                        block = BlockId.Gravel;
+                    }
+                    else if (surfacePatch < -0.55f && y < 72 && block == BlockId.Netherrack)
+                    {
+                        world.SetBlock(x, y, z, BlockId.SoulSand);
+                        block = BlockId.SoulSand;
+                    }
+
+                    // Fire scattered around like grass on netherrack.
+                    if (block == BlockId.Netherrack && above == BlockId.Air && random.NextDouble() < 0.015)
+                    {
+                        world.SetBlock(x, y + 1, z, BlockId.Fire);
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        var spawnX = sizeX / 2;
+        var spawnZ = sizeZ / 2;
+
+        // Carve and floor a small safe cavern, then build the return portal.
+        for (var x = spawnX - 9; x <= spawnX + 9; x++)
+        {
+            for (var z = spawnZ - 9; z <= spawnZ + 9; z++)
+            {
+                for (var y = lavaSeaLevel - 2; y <= lavaSeaLevel + 18; y++)
+                {
+                    world.SetBlock(x, y, z, BlockId.Air);
+                }
+
+                for (var y = lavaSeaLevel - 6; y <= lavaSeaLevel - 3; y++)
+                {
+                    world.SetBlock(x, y, z, y == lavaSeaLevel - 3 ? BlockId.Netherrack : BlockId.SoulSand);
+                }
+            }
+        }
+
+        BuildPortal(world, spawnX, lavaSeaLevel - 2, spawnZ + 2, alongX: true);
+
+        return new TerrainGenerationResult(world, seed, spawnX, lavaSeaLevel - 2, spawnZ);
+    }
+
+    /// <summary>Builds a 4x5 obsidian frame with a 2x3 portal interior.</summary>
+    public static void BuildPortal(World world, int x, int y, int z, bool alongX)
+    {
+        for (var offset = -1; offset <= 2; offset++)
+        {
+            for (var height = 0; height < 5; height++)
+            {
+                var frame = offset is -1 or 2 || height is 0 or 4;
+                var block = frame ? BlockId.Obsidian : BlockId.NetherPortal;
+                var px = alongX ? x + offset : x;
+                var pz = alongX ? z : z + offset;
+                world.SetBlock(px, y + height, pz, block);
+            }
+        }
+    }
 }
